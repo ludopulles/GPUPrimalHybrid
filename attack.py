@@ -12,22 +12,21 @@ import threading
 
 
 from blaster import reduce
+# from hkz import hkz_kernel
 #from reduction import reduction
-
-stop_event = threading.Event()
 
 def reduction(basis, beta, alg, target):
     timestart = time.time()
     basis = np.array(basis, dtype=np.int64)
     B_np = basis.T
-    for blocksize in range(40, beta+1):
-        print(f"a Instance starting a BKZ at blocksize: {blocksize}")
-        _, B_np, _ = reduce(B_np, cores=1, use_seysen=True, beta=blocksize, bkz_tours=1)
-        if (B_np[:, 0] == target).all() or (B_np[:, 0] == -target).all(): 
-            print("we find the target vector")
-            break
-        if stop_event:
-            break
+    _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=1, hkz_use=True)
+    if (B_np[:, 0] == target).all() or (B_np[:, 0] == -target).all(): 
+        print("we find the target vector")
+    # for blocksize in range(40, beta+1):
+    #     _, B_np, _ = reduce(B_np, use_seysen=True, beta=blocksize, bkz_tours=1)
+    #     if (B_np[:, 0] == target).all() or (B_np[:, 0] == -target).all(): 
+    #         print("we find the target vector")
+    #         break
     finish = time.time()
     return B_np.T, finish - timestart
 
@@ -110,26 +109,31 @@ def attack(atk_params):
         n_cores = psutil.cpu_count(logical=False)
         workers = min(iterations, n_cores)
         print(f"Number of CPU cores available: {n_cores}")
-        #drop_and_solve(lwe, params, 0)  # run the first iteration to see if it works
-        with ThreadPoolExecutor(max_workers=workers) as exe:
-            # Submit the drop and solve task to the executor
-            futures = [exe.submit(drop_and_solve, lwe, params, i)
-               for i in range(iterations)]
-            for fut in as_completed(futures):
-                try:
-                    result = fut.result()   # will re‐raise if drop_and_solve errored
-                    sv, target = result
-                    if (sv == target).all() or (sv == -target).all():
-                        print(f"Found a solution in iteration {futures.index(fut)}: {sv}")
-                        stop_event.set()
-                        for other in futures:
-                            if not other.done():
-                                other.cancel()
-                        break
+        #sv, target = drop_and_solve(lwe, params, 0)  # run the first iteration to see if it works
+        for i in range(iterations):
+            sv, target = drop_and_solve(lwe, params, i) 
+            if (sv == target).all() or (sv == -target).all():
+                print(f"Found a solution in iteration {i}: {sv}")
+                break
+        # with ThreadPoolExecutor(max_workers=workers) as exe:
+        #     # Submit the drop and solve task to the executor
+        #     futures = [exe.submit(drop_and_solve, lwe, params, i)
+        #        for i in range(iterations)]
+        #     for fut in as_completed(futures):
+        #         try:
+        #             result = fut.result()   # will re‐raise if drop_and_solve errored
+        #             sv, target = result
+        #             if (sv == target).all() or (sv == -target).all():
+        #                 print(f"Found a solution in iteration {futures.index(fut)}: {sv}")
+        #                 stop_event.set()
+        #                 for other in futures:
+        #                     if not other.done():
+        #                         other.cancel()
+        #                 break
 
-                except Exception as e:
-                    # A task failed (or returned an exception)—you can log or ignore
-                    print("One iteration failed:", e)
+        #         except Exception as e:
+        #             # A task failed (or returned an exception)—you can log or ignore
+        #             print("One iteration failed:", e)
             
 
 
