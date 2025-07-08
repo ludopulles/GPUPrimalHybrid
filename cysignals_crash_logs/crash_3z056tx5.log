@@ -1,0 +1,71 @@
+GNU gdb (Ubuntu 15.0.50.20240403-0ubuntu1) 15.0.50.20240403-git
+Copyright (C) 2024 Free Software Foundation, Inc.
+License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+Type "show copying" and "show warranty" for details.
+This GDB was configured as "x86_64-linux-gnu".
+Type "show configuration" for configuration details.
+For bug reporting instructions, please see:
+<https://www.gnu.org/software/gdb/bugs/>.
+Find the GDB manual and other documentation resources online at:
+    <http://www.gnu.org/software/gdb/documentation/>.
+
+For help, type "help".
+Type "apropos word" to search for commands related to "word".
+[New LWP 100386]
+[New LWP 100385]
+[New LWP 100384]
+[New LWP 100383]
+[New LWP 100382]
+[New LWP 100381]
+[New LWP 100380]
+[New LWP 100379]
+[New LWP 100378]
+[New LWP 100377]
+[New LWP 100376]
+[New LWP 100375]
+[New LWP 100374]
+[New LWP 100373]
+[New LWP 100372]
+[New LWP 92508]
+[New LWP 92507]
+[New LWP 92506]
+[New LWP 92505]
+[New LWP 92504]
+[New LWP 92503]
+[New LWP 92502]
+[New LWP 92501]
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.ubuntu.com>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x000077463c1107e3 in __GI___wait4 (pid=100371, stat_loc=0x0, options=0, 
+    usage=0x0) at ../sysdeps/unix/sysv/linux/wait4.c:30
+
+Stack backtrace
+---------------
+    usage=0x0) at ../sysdeps/unix/sysv/linux/wait4.c:30
+        sc_ret = -512
+        sc_cancel_oldtype = 2
+        sc_ret = <optimized out>
+#1  0x000077463848f005 in sigdie ()
+   from /home/paul/miniforge3/envs/lwe_attack/lib/python3.12/site-packages/cysignals/signals.cpython-312-x86_64-linux-gnu.so
+No symbol table info available.
+#2  0x00007746384918f7 in cysigs_signal_handler ()
+   from /home/paul/miniforge3/envs/lwe_attack/lib/python3.12/site-packages/cysignals/signals.cpython-312-x86_64-linux-gnu.so
+No symbol table info available.
+#3  <signal handler called>
+No locals.
+#4  0x000077455cd1bdaa in __pyx_pf_12blaster_core_6block_deep_lll(_object*, int, tagPyArrayObject*, tagPyArrayObject*, tagPyArrayObject*, double, int, int) [clone .isra.0] ()
+   from /home/paul/BLASter/src/blaster_core.cpython-312-x86_64-linux-gnu.so
+No symbol table info available.
+Backtrace stopped: Cannot access memory at address 0x64350b9eaab457f8
+[Inferior 1 (process 92475) detached]
+warning: 30	../sysdeps/unix/sysv/linux/wait4.c: No such file or directory
+Python Exception <class 'ModuleNotFoundError'>: No module named 'Cython'
+Error occurred in Python: No module named 'Cython'
