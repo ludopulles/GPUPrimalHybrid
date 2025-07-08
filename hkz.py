@@ -35,28 +35,28 @@ from g6k.utils.cli import parse_args, run_all, pop_prefixed_params
 from g6k.utils.stats import SieveTreeTracer
 from g6k.utils.util import load_svpchallenge_and_randomize, db_stats
 import six
+from fpylll import IntegerMatrix
 
 
 def hkz_kernel(A,n):
     # Pool.map only supports a single parameter
-
+    if not isinstance(A, IntegerMatrix):
+        A = IntegerMatrix.from_matrix(A.T) # suppose that A is a numpy array column based like blaster
     params = {"pump__down_sieve": True, "pump__down_stop": 9999, "saturation_ratio":.8, "pump__prefer_left_insert":10, "workout__dim4free_min":0,"workout__dim4free_dec":15}
     reserved_n = n
     params = params.new(reserved_n=reserved_n, otf_lift=False)
     pump_params = pop_prefixed_params("pump", params)
     workout_params = pop_prefixed_params("workout", params)
-    challenge_seed = params.pop("challenge_seed")
 
-    A, _ = load_svpchallenge_and_randomize(n, s=challenge_seed, seed=seed)
-
-    g6k = Siever(A, params, seed=seed)
+    g6k = Siever(A, params)
     tracer = SieveTreeTracer(g6k, root_label=("hkz", n), start_clocks=True)
 
     # runs a workout woth pump-down down until the end
-    workout(g6k, tracer, 0, n, pump_params=pump_params, verbose=verbose, **workout_params)
+    workout(g6k, tracer, 0, n, pump_params=pump_params, **workout_params)
     #Just making sure
     pump(g6k, tracer, 15, n-15, 0, **pump_params)
     g6k.lll(0, n)
+    # print(g6k.M.U)
     return tracer.exit()
 
 
