@@ -51,12 +51,12 @@ def SpTerLWE(n: int, m: int, q: int, hw: int, err_std: float = 3.2):
     print(f"Secret: {s}")
     return fixed_secret_lwe(n, m, q, s, err_std=err_std)
 
-def CreateLWEInstance(n, log_q, log_p, w, lwe_sigma, type_of_secret='ternary'):
+def CreateLWEInstance(n, log_q, w, lwe_sigma, type_of_secret='ternary'):
     """
     Create an LWE instance with the given parameters.
     """
     q = 2 ** log_q
-    m = round(7*n/8)  # Example: m is 7n/8
+    m = round(7*n/8)  # Example: m is 7n/8 
     if type_of_secret == 'ternary':
         return SpTerLWE(n, m, q, w, err_std=lwe_sigma)
     else:

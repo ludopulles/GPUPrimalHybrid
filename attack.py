@@ -19,7 +19,8 @@ def reduction(basis, beta, alg, target):
     timestart = time.time()
     basis = np.array(basis, dtype=np.int64)
     B_np = basis.T
-    _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=1, hkz_use=True)
+    print(f"try a HKZ-{beta}")
+    _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=1, hkz_use=True, bkz_size=beta) #hkz_use=True, bkz_size=beta, this only for hkz 
     if (B_np[:, 0] == target).all() or (B_np[:, 0] == -target).all(): 
         print("we find the target vector")
     # for blocksize in range(40, beta+1):
@@ -34,7 +35,7 @@ def primal_attack(atk_params):
     """
     create the LWE instance.
     """
-    lwe = CreateLWEInstance(atk_params['n'], atk_params['log_q'], atk_params['log_p'], atk_params['w'], atk_params['lwe_sigma'], type_of_secret=atk_params['secret_type'])
+    lwe = CreateLWEInstance(atk_params['n'], atk_params['log_q'], atk_params['w'], atk_params['lwe_sigma'], type_of_secret=atk_params['secret_type'])
     A, b, s, e = lwe
     q = 2 ** atk_params['log_q']
     assert ((np.dot(A, s) + e) % q == b).all(), "LWE instance is not valid"
@@ -52,8 +53,8 @@ def drop_and_solve(lwe, params, iteration):
     """
     n = params['n']
     k = params['k']
-    m = params['m']
     w = params['w']
+    m = round(7*n/8) # at edit
     q = 2 ** params['log_q']
     sigma = params['lwe_sigma']
     beta = params['beta']
@@ -87,17 +88,14 @@ def attack(atk_params):
     for params in atk_params:
         n = params['n']
         log_q = params['log_q']
-        log_p = params['log_p']
         w = params['w']
         lwe_sigma = params['lwe_sigma']
         beta = params['beta']
         single_guess_succ = params['single_guess_succ']
         float_type = params['float_type']
         k = params['k']
-        m = params['m']
-        b = params['b']
         secret_type = params['secret_type']
-        print(f"Attacking with n={n}, log_q={log_q}, log_p={log_p}, w={w}, lwe_sigma={lwe_sigma}, beta={beta}, single_guess_succ={single_guess_succ}, float_type={float_type}, k={k}, m={m}, b={b}, secret_type={secret_type}")
+        print(f"Attacking with n={n}, log_q={log_q}, w={w}, lwe_sigma={lwe_sigma}, beta={beta}, single_guess_succ={single_guess_succ}, float_type={float_type}, k={k}, secret_type={secret_type}")
         # compute the number of iterations
         p = ((math.comb(n-w,k))/math.comb(n,k))
         print(f"Probability of success in a single guess: {p:.4f}")
@@ -108,6 +106,7 @@ def attack(atk_params):
         lwe = primal_attack(params)
         n_cores = psutil.cpu_count(logical=False)
         workers = min(iterations, n_cores)
+        print("dimension of the lattice : ", lwe[0].shape)
         print(f"Number of CPU cores available: {n_cores}")
         #sv, target = drop_and_solve(lwe, params, 0)  # run the first iteration to see if it works
         for i in range(iterations):

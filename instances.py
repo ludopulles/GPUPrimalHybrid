@@ -117,8 +117,7 @@ def BaiGalCenteredScaled(n: int, q: int, w: int, sigma: float, lwe: Tuple, k: in
     nu = ZZ(x)/ZZ(y)
 
     # build basis
-    top_rows = zero_matrix(m, n-k).augment(q *
-                                           identity_matrix(m)).augment(zero_matrix(m, 1))
+    top_rows = zero_matrix(m, n-k).augment(q * identity_matrix(m)).augment(zero_matrix(m, 1))
     mid_rows = (-nu * identity_matrix(n-k)).augment(A2.transpose()
                                                     ).augment(zero_matrix(n-k, 1))
     bot_rows = zero_matrix(QQ, 1, n-k).augment(matrix(QQ, b2 -
@@ -129,7 +128,6 @@ def BaiGalCenteredScaled(n: int, q: int, w: int, sigma: float, lwe: Tuple, k: in
     # print("target = y (n-k) * [nu (s - t One) || e || round(sigma)]")
     target = balance(vector(ZZ, t.denominator() * y * vector(QQ, list(nu *
                      (__s2 - t_vec)) + list(__e[:m]) + [kannan_coeff])), q=t.denominator() * y * q)
-
     return basis, target
 
 
