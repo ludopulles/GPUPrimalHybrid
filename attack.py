@@ -1,7 +1,7 @@
 import math
 
 from lwe import CreateLWEInstance
-from instances import BaiGalCenteredScaled
+from instances import BaiGalCenteredScaledTernary, BaiGalModuleLWE
 
 import psutil
 import os
@@ -19,10 +19,25 @@ def reduction(basis, beta, alg, target):
     timestart = time.time()
     basis = np.array(basis, dtype=np.int64)
     B_np = basis.T
-    print(f"try a HKZ-{beta}")
-    _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=1, hkz_use=True, bkz_size=beta) #hkz_use=True, bkz_size=beta, this only for hkz 
-    if (B_np[:, 0] == target).all() or (B_np[:, 0] == -target).all(): 
-        print("we find the target vector")
+    print(f"try a progressive BKZ-{beta} on a {basis.shape} matrix") # i really think it's better to have a 2**n + 2**n+1 so k = 7n/8 - n/2 
+
+    #progressive starting by doing a DeepLLL
+    bkz_prog = 2
+    if beta < 40:
+        list_beta = [beta] # just do the DeepLLL
+    else:
+        list_beta = [30] + list(range(40 + ((beta - 40) % bkz_prog), beta + 1, bkz_prog))
+    for beta in list_beta:
+        if beta < 40:
+            print(f"BKZ can't be do before 40 just do a DeepLLL-{beta}")
+            _, B_np, _ = reduce(B_np, use_seysen=True, depth=beta, bkz_tours=1, cores=16) #hkz_use=True, bkz_size=beta, this only for hkz
+        else:
+            print(f"try a BKZ-{beta} on a {basis.shape} matrix") 
+            _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=1, cores=16)
+        print(B_np[:, 0])
+        if (B_np[:, 0] == target).all() or (B_np[:, 0] == -target).all(): # can be replace with a real test like test if the A*s-b small enough
+            print("we find the target vector")
+            break
     # for blocksize in range(40, beta+1):
     #     _, B_np, _ = reduce(B_np, use_seysen=True, beta=blocksize, bkz_tours=1)
     #     if (B_np[:, 0] == target).all() or (B_np[:, 0] == -target).all(): 
@@ -35,10 +50,10 @@ def primal_attack(atk_params):
     """
     create the LWE instance.
     """
-    lwe = CreateLWEInstance(atk_params['n'], atk_params['log_q'], atk_params['w'], atk_params['lwe_sigma'], type_of_secret=atk_params['secret_type'])
+    lwe = CreateLWEInstance(atk_params['n'], atk_params['log_q'], atk_params['m'], atk_params['w'], atk_params['lwe_sigma'], type_of_secret=atk_params['secret_type'], eta = (atk_params['eta'] if 'eta' in atk_params else None))
     A, b, s, e = lwe
     q = 2 ** atk_params['log_q']
-    assert ((np.dot(A, s) + e) % q == b).all(), "LWE instance is not valid"
+    #assert ((np.dot(A, s) + e) % q == b).all(), "LWE instance is not valid"
     return lwe
 
 def drop_and_solve(lwe, params, iteration):
@@ -54,19 +69,28 @@ def drop_and_solve(lwe, params, iteration):
     n = params['n']
     k = params['k']
     w = params['w']
-    m = round(7*n/8) # at edit
     q = 2 ** params['log_q']
+    m = params['m']
     sigma = params['lwe_sigma']
     beta = params['beta']
+    
+    #try k 
+
 
     # drop columns
     print(f"Iteration {iteration}: starting drop")
     _seed = int.from_bytes(os.urandom(4))
     # _seed = 0
     np.random.seed(_seed)
-    columns_to_keep = sorted(np.random.choice(lwe[0].shape[1], params['n']-params['k'], replace=False))
+    if 'k_dim' in params:
+        columns_to_keep = sorted(np.random.choice(lwe[0].shape[1], params['k_dim']*params['n']-params['k'], replace=False))
+    else:    
+        columns_to_keep = sorted(np.random.choice(lwe[0].shape[1], params['n']-params['k'], replace=False))
     #build the embedding 
-    basis, target = BaiGalCenteredScaled(n, q, w, sigma, lwe, k, m, columns_to_keep=columns_to_keep)
+    if params["secret_type"] == "ternary":
+        basis, target = BaiGalCenteredScaledTernary(n, q, w, sigma, lwe, k, m, columns_to_keep=columns_to_keep)
+    if params["secret_type"] == "binomial":
+        basis, target = BaiGalModuleLWE(n, q, w, sigma, lwe, k, columns_to_keep=columns_to_keep)
     print(f"Iteration {iteration}: starting solve")
     reduced_basis, _ = reduction(basis, beta, "pbkz", target)
     # check if the last column is the target
@@ -93,8 +117,18 @@ def attack(atk_params):
         beta = params['beta']
         single_guess_succ = params['single_guess_succ']
         float_type = params['float_type']
-        k = params['k']
+        #k = params['k']
+
         secret_type = params['secret_type']
+        if 'k_dim' in params:
+            params['m'] = n
+        else:
+            params['m'] = round(7*n/8)
+        #edit in place 
+        #k = params['m'] - 3*n//4 + 1
+        k= 1
+        params['k'] = k
+
         print(f"Attacking with n={n}, log_q={log_q}, w={w}, lwe_sigma={lwe_sigma}, beta={beta}, single_guess_succ={single_guess_succ}, float_type={float_type}, k={k}, secret_type={secret_type}")
         # compute the number of iterations
         p = ((math.comb(n-w,k))/math.comb(n,k))
@@ -106,7 +140,7 @@ def attack(atk_params):
         lwe = primal_attack(params)
         n_cores = psutil.cpu_count(logical=False)
         workers = min(iterations, n_cores)
-        print("dimension of the lattice : ", lwe[0].shape)
+        #print("dimension of the lattice : ", lwe[0].shape)
         print(f"Number of CPU cores available: {n_cores}")
         #sv, target = drop_and_solve(lwe, params, 0)  # run the first iteration to see if it works
         for i in range(iterations):

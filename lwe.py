@@ -1,5 +1,8 @@
 import numpy as np
 from random import sample
+from sage.all import PolynomialRing, ZZ, QQ, Zmod, randint, matrix, zero_matrix, identity_matrix, vector, sample, IntegerModRing # type: ignore #noqa
+from sage.crypto.lwe import DiscreteGaussianDistributionPolynomialSampler as DRGauss # type: ignore #noqa
+
 
 def fixed_secret_lwe(
     n: int,
@@ -42,127 +45,107 @@ def fixed_secret_lwe(
 
     return A, b, s, e
 
-def SpTerLWE(n: int, m: int, q: int, hw: int, err_std: float = 3.2):
-    assert hw >= 0
-    # print(n, hw)
-    indices = sample(list(range(n)), hw)
-    # sample sa ternary secret where only `indices` contain +/- 1s
-    s = np.array([sample([-1, 1], 1)[0] if ind in indices else 0 for ind in range(n)])
-    print(f"Secret: {s}")
-    return fixed_secret_lwe(n, m, q, s, err_std=err_std)
 
-def CreateLWEInstance(n, log_q, w, lwe_sigma, type_of_secret='ternary'):
+
+def hamming_weight_fix_CBD_MLWE(
+    n: int,
+    q: int,
+    k: int,
+    m: int,
+    eta: int,
+    hw: int
+):
+    # Anneau cyclotomique R_q = (Z/qZ)[x]/(x^n+1)
+    Rq = PolynomialRing(IntegerModRing(q), 'x')
+    x = Rq.gen()
+    Rq    = Rq.quotient(x**n + 1)
+
+    # centered binomial sampler
+    def cbd():
+        return sum(randint(0,1) - randint(0,1) for _ in range(eta))
+
+    # Secret ternaire de Hamming-weight = hw
+    global_idx = sample(range(k*n), hw)
+
+    # 2) on construit une « liste plate » de coefficients de longueur k*n
+    flat = [0]*(k*n)
+    for idx in global_idx:
+        # on resample CBD tant que c'est 0
+        val = 0
+        while val == 0:
+            val = sum(randint(0,1) - randint(0,1) for _ in range(eta))
+        flat[idx] = val
+
+    # 3) on reforme k listes de taille n
+    S = []
+    for j in range(k):
+        coeffs = flat[j*n:(j+1)*n]
+        S.append(Rq(coeffs))
+
+    # Génération de m échantillons
+    A = [
+      [Rq.random_element(degree=n-1) for _ in range(k)]
+      for __ in range(m)
+    ]
+    Zx = PolynomialRing(ZZ, 'x')
+    gauss_sampler = DRGauss(Zx, n, err_std) 
+    E = [ Rq([cbd() for _ in range(n)]) for _ in range(m) ]
+    B = [ sum(A[i][j]*S[j] for j in range(k)) + E[i] for i in range(m) ]
+
+    return A, B, S, E
+
+def flatten_module_LWE(
+    A_list, B_list, S_list, E_list,
+    n: int, k: int, q: int,
+    m_samples: int = None
+):
+    m_old = len(A_list)
+    m     = m_old if m_samples is None else min(m_samples, m_old)
+    M, N  = m*n, k*n
+
+    A_eq = np.zeros((M, N), dtype=int)
+    b_eq = np.zeros(M,      dtype=int)
+    e_eq = np.zeros(M,      dtype=int)
+
+    for i in range(m):
+      for t in range(n):
+        row = i*n + t
+        b_eq[row] = int(B_list[i][t]) % q
+        e_eq[row] = int(E_list[i][t]) % q
+        for j in range(k):
+          poly = A_list[i][j]
+          for u in range(n):
+            col       = j*n + u
+            idx  = (t - u) % n
+            sign = 1 if t >= u else -1 # cyclic with -1 (rot matrix)
+            A_eq[row, col] = (sign * int(poly[idx])) % q
+
+    s_eq = np.zeros(N, dtype=int)
+    for j in range(k):
+      for u in range(n):
+        s_eq[j*n + u] = int(S_list[j][u]) % q
+    pred = (A_eq.dot(s_eq) + e_eq) % q
+    assert np.array_equal(pred, b_eq), (
+        "Erreur de flatten : "
+        f"b_eq != A_eq @ s_eq + e_eq mod {q}"
+    )
+
+    return A_eq, b_eq, s_eq, e_eq
+
+def CreateLWEInstance(n, log_q, m, w, lwe_sigma, type_of_secret='ternary', eta = None):
     """
     Create an LWE instance with the given parameters.
     """
     q = 2 ** log_q
-    m = round(7*n/8)  # Example: m is 7n/8 
     if type_of_secret == 'ternary':
         return SpTerLWE(n, m, q, w, err_std=lwe_sigma)
+    elif type_of_secret == 'binomial':
+        if not eta:
+            raise ValueError(f"eta need to be defined")
+        #only module k = 2 here
+        k = 2
+        A2, B2, S2, E2 = hamming_weight_fix_CBD_MLWE(n, q, k, k, eta, w)
+
+        return flatten_module_LWE(A2, B2, S2, E2, n, k, q, k)
     else:
         raise ValueError(f"Unsupported secret type: {type_of_secret}")
-    
-
-from fractions import Fraction
-import math
-from typing import Tuple, List
-
-def approx_nu(nu: float) -> Tuple[int, int]:
-    """
-    Find a rational approximation of nu using Farey sequence.
-    Returns a tuple (x, y) such that nu is approximately x/y.
-    """
-    # Convert nu to a fraction
-    frac = Fraction(nu).limit_denominator(1000)
-    return frac.numerator, frac.denominator
-
-def balance(vec: np.ndarray, mod: int) -> np.ndarray:
-    """
-    Reduce each entry of vec modulo `mod` into the range [-mod//2, mod//2].
-    """
-    v = np.mod(vec, mod)
-    # shift values > mod/2 back into the negative range
-    half = mod // 2
-    v[v > half] -= mod
-    return v
-
-def BaiGalCenteredScaled(
-    n: int,
-    q: int,
-    w: int,
-    sigma: float,
-    lwe: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
-    k: int,
-    m: int,
-    columns_to_keep: List[int],
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Pure-NumPy version of the Sage Bai-Gal centered+scaled basis+target builder.
-    """
-    A, b, s, e, q = lwe
-    # integer coefficient (rounded sigma)
-    kannan_coeff = int(round(sigma))
-
-    # --- 1) extract the submatrix A2, sub-vectors b2, s2
-    assert (n - k == len(columns_to_keep))
-    A2 = A[:m, columns_to_keep]            # shape (m, n-k)
-    b2 = b[:m]                              # shape (m,)
-    s2 = s[columns_to_keep]                # shape (n-k,)
-
-    # --- 2) compute t and nu, then override t=0 per your comment
-    # t = w/(n-k)
-    # nu = sigma * (n-k) / math.sqrt(w*(n-k-w))
-    t = 0.0
-    nu = sigma * math.sqrt((n-k)/w)
-
-    # make t_vec of length n-k
-    t_vec = np.full(n-k, t, float)
-
-    # rational approximation of nu
-    x, y = approx_nu(nu)
-    # we will work with nu_rat = x/y
-    # note: we'll multiply the whole basis by (y) to clear denominators
-    nu_num = x
-    nu_den = y
-
-    # --- 3) build the three block-row pieces
-    # top_rows: [ 0_{m×(n-k)} | q I_m | 0_{m×1} ]
-    top_left  = np.zeros((m, n-k), dtype=int)
-    top_mid   = q * np.eye(m, dtype=int)
-    top_right = np.zeros((m, 1),  dtype=int)
-    top_rows  = np.hstack([top_left, top_mid, top_right])
-
-    # mid_rows: [ -nu*I_{n-k} | A2^T | 0_{(n-k)×1} ], but clear denominators later
-    mid_left  = -nu_num * np.eye(n-k, dtype=int)      # will divide by nu_den
-    mid_mid   = A2.T.astype(int)
-    mid_right = np.zeros((n-k, 1), dtype=int)
-    mid_rows  = np.hstack([mid_left, mid_mid, mid_right])
-
-    # bot_rows: [ 0_{1×(n-k)} | (b2 - A2 t_vec) | kannan_coeff ]
-    bot_left  = np.zeros((1, n-k), dtype=int)
-    # compute (b2 - A2 @ t_vec) as floats, then we will clear denominators
-    b2_shift  = (b2 - A2.dot(t_vec)).astype(float)
-    bot_mid   = b2_shift.reshape(1, -1).astype(int)
-    bot_right = np.array([[kannan_coeff]], dtype=int)
-    bot_rows  = np.hstack([bot_left, bot_mid, bot_right])
-
-    # --- 4) stack them into one basis matrix
-    basis_float = np.vstack([top_rows, mid_rows, bot_rows])
-
-    # clear the single nu_den denominator by multiplying those mid_rows
-    # i.e. multiply entire basis by nu_den
-    basis = (nu_den * basis_float).astype(int)
-
-    # --- 5) build the target vector
-    # target = [ nu*(s2 - t_vec) , e[:m], kannan_coeff ]  all * y
-    part1 = nu * (s2 - t_vec)                  # floats
-    part2 = e[:m].astype(float)
-    part3 = np.array([kannan_coeff], float)
-    tgt_float = np.concatenate([part1, part2, part3])
-    # clear denominator y
-    target = (nu_den * tgt_float).astype(int)
-    # finally, balance modulo (q * nu_den)
-    mod = q * nu_den
-    target = balance(target, mod)
-
-    return basis, target

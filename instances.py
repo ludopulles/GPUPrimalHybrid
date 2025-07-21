@@ -91,7 +91,7 @@ from math import sqrt
 #     return RLWE(n, q, err_std=err_std, secr_distr=lambda: CBD(eta))
 
 
-def BaiGalCenteredScaled(n: int, q: int, w: int, sigma: float, lwe: Tuple, k: int, m: int, columns_to_keep: List[int]):
+def BaiGalCenteredScaledTernary(n: int, q: int, w: int, sigma: float, lwe: Tuple, k: int, m: int, columns_to_keep: List[int]):
     # [ 0, (y * q) I_m, 0 // -x I_{n-k} ,  y A2^t, 0 // 0, y (b - A2 (t One))^t, y]
     A, b, __s, __e = lwe
     kannan_coeff = QQ(round(sigma))
@@ -130,6 +130,43 @@ def BaiGalCenteredScaled(n: int, q: int, w: int, sigma: float, lwe: Tuple, k: in
                      (__s2 - t_vec)) + list(__e[:m]) + [kannan_coeff])), q=t.denominator() * y * q)
     return basis, target
 
+
+def hamming_weight(vec):
+    return sum(1 for x in vec if x != 0)
+
+def BaiGalModuleLWE(
+    n: int,         # degré cyclotomique de base
+    q: int,
+    w: int,         # Hamming weight target
+    sigma: float,
+    module_lwe: tuple,  # (A_list, B_list, S_list, E_list, f)
+    target_k: int,      # nombre de coord du secret à RECUPERER
+    columns_to_keep: list[int]
+):
+    """
+    wrapper for Module-LWE with Bai-Gal
+    """
+    A_eq, b_eq, s_eq, e_eq = module_lwe
+
+    # 2) dimension totale
+    N = len(s_eq)
+    M = len(b_eq)
+
+    s_eq = balance(vector(Zmod(q), s_eq.tolist()), q)
+
+    print("Secret :", s_eq)
+    print("hamming weight of it:", hamming_weight(s_eq))
+
+    return BaiGalCenteredScaledTernary(
+        n = N,
+        q = q,
+        w = w,
+        sigma = sigma,
+        lwe   = (A_eq, b_eq, s_eq, e_eq),
+        k     = target_k,
+        m     = M,
+        columns_to_keep = columns_to_keep
+    )
 
 # def qary_embedding(n: int, q: int, m: int, k: int = 0, sigma: float = 3.2):
 #     # creates a Bai-Galbraith embedding for m samples from the "uniform" distribution in the Decision-LWE game
