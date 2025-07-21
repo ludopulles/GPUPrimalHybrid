@@ -87,8 +87,6 @@ def hamming_weight_fix_CBD_MLWE(
       [Rq.random_element(degree=n-1) for _ in range(k)]
       for __ in range(m)
     ]
-    Zx = PolynomialRing(ZZ, 'x')
-    gauss_sampler = DRGauss(Zx, n, err_std) 
     E = [ Rq([cbd() for _ in range(n)]) for _ in range(m) ]
     B = [ sum(A[i][j]*S[j] for j in range(k)) + E[i] for i in range(m) ]
 
