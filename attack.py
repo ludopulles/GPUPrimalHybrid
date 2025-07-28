@@ -10,8 +10,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import threading
 
-
 from blaster import reduce
+from blaster import get_profile, slope, rhf
 # from hkz import hkz_kernel
 #from reduction import reduction
 
@@ -22,19 +22,22 @@ def reduction(basis, beta, alg, target):
     print(f"try a progressive BKZ-{beta} on a {basis.shape} matrix") # i really think it's better to have a 2**n + 2**n+1 so k = 7n/8 - n/2 
 
     #progressive starting by doing a DeepLLL
-    bkz_prog = 2
-    if beta < 40:
+    bkz_prog = 1
+    if beta < 50:
         list_beta = [beta] # just do the DeepLLL
     else:
-        list_beta = [30] + list(range(40 + ((beta - 40) % bkz_prog), beta + 1, bkz_prog))
+        list_beta = [30] + list(range(50 + ((beta - 50) % bkz_prog), beta + 1, bkz_prog))
     for beta in list_beta:
-        if beta < 40:
-            print(f"BKZ can't be do before 40 just do a DeepLLL-{beta}")
-            _, B_np, _ = reduce(B_np, use_seysen=True, depth=beta, bkz_tours=1, cores=16) #hkz_use=True, bkz_size=beta, this only for hkz
+        if beta < 50:
+            print(f"just do a DeepLLL-{beta}")
+            _, B_np, _ = reduce(B_np, use_seysen=True, depth=beta, bkz_tours=4, cores=16, verbose=False) #hkz_use=True, bkz_size=beta, this only for hkz
         else:
-            print(f"try a BKZ-{beta} on a {basis.shape} matrix") 
-            _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=1, cores=16)
-        print(B_np[:, 0])
+            print(f"try a BKZ-{beta} on a {basis.shape} matrix")
+            _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=4, cores=16, verbose=False)
+        prof = get_profile(B_np)
+        print('\nProfile = [' + ' '.join([f'{x:.2f}' for x in prof]) + ']\n'
+              f'RHF = {rhf(prof):.5f}^n, slope = {slope(prof):.6f}, '
+              f'∥b_1∥ = {2.0**prof[0]:.1f}')
         if (B_np[:, 0] == target).all() or (B_np[:, 0] == -target).all(): # can be replace with a real test like test if the A*s-b small enough
             print("we find the target vector")
             break
@@ -83,14 +86,18 @@ def drop_and_solve(lwe, params, iteration):
     # _seed = 0
     np.random.seed(_seed)
     if 'k_dim' in params:
+        _,_,s,_ = lwe
         columns_to_keep = sorted(np.random.choice(lwe[0].shape[1], params['k_dim']*params['n']-params['k'], replace=False))
+        good = [i for i in columns_to_keep if s[i] != 0]
+        if len(good) != w:
+            return np.array([0, 0]), np.array([1, 1]) # false in the loop
     else:    
         columns_to_keep = sorted(np.random.choice(lwe[0].shape[1], params['n']-params['k'], replace=False))
     #build the embedding 
     if params["secret_type"] == "ternary":
         basis, target = BaiGalCenteredScaledTernary(n, q, w, sigma, lwe, k, m, columns_to_keep=columns_to_keep)
     if params["secret_type"] == "binomial":
-        basis, target = BaiGalModuleLWE(n, q, w, sigma, lwe, k, columns_to_keep=columns_to_keep)
+        basis, target = BaiGalModuleLWE(n, q, w, m, sigma, lwe, k, columns_to_keep=columns_to_keep)
     print(f"Iteration {iteration}: starting solve")
     reduced_basis, _ = reduction(basis, beta, "pbkz", target)
     # check if the last column is the target
@@ -98,6 +105,37 @@ def drop_and_solve(lwe, params, iteration):
     # print(f"reduced basis: {reduced_basis[0]}")
     return reduced_basis[0], target
 
+from estimator import *
+
+def next_power_or_sum(d: int) -> int:
+    """
+    Pour un entier d >= 1, renvoie le plus petit nombre >= d parmi :
+      - 2^n
+      - 2^n + 2^(n-1)
+    en testant pour n = floor(log2(d)) et n+1.
+    """
+
+    if d < 1:
+        raise ValueError("d doit être un entier >= 1")
+
+    # exposant de base
+    n0 = math.floor(math.log2(d))
+
+    candidats = set()
+
+    # pour n0 et n0+1, générer 2^n et 2^n + 2^(n-1)
+    for n in (n0, n0 + 1):
+        p = 2 ** n
+        candidats.add(p)
+        if n >= 1:
+            candidats.add(p + 2 ** (n - 1))
+
+    # ne garder que ceux >= d, puis prendre le plus petit
+    candidats_sup = [x for x in candidats if x >= d]
+    if not candidats_sup:
+        # en théorie, on ne tombe jamais ici puisque 2^(n0+1) >= d
+        raise RuntimeError("Aucun candidat trouvé")
+    return min(candidats_sup)
 
 def attack(atk_params):
     """
@@ -114,35 +152,44 @@ def attack(atk_params):
         log_q = params['log_q']
         w = params['w']
         lwe_sigma = params['lwe_sigma']
-        beta = params['beta']
         single_guess_succ = params['single_guess_succ']
-        float_type = params['float_type']
         #k = params['k']
 
         secret_type = params['secret_type']
-        if 'k_dim' in params:
-            params['m'] = n
-        else:
-            params['m'] = round(7*n/8)
-        #edit in place 
-        #k = params['m'] - 3*n//4 + 1
-        k= 1
-        params['k'] = k
+        # if 'k_dim' in params:
+        #     params['m'] = n
+        # else:
+        params['m'] = round(7*n/8)
 
-        print(f"Attacking with n={n}, log_q={log_q}, w={w}, lwe_sigma={lwe_sigma}, beta={beta}, single_guess_succ={single_guess_succ}, float_type={float_type}, k={k}, secret_type={secret_type}")
-        # compute the number of iterations
-        p = ((math.comb(n-w,k))/math.comb(n,k))
-        print(f"Probability of success in a single guess: {p:.4f}")
-        print(f"Theoritical number of iterations need to succeed: {math.ceil(1/p)}")
-        confidence = 0.99 # 99% confidence level
-        iterations = math.ceil(math.log(1 - confidence) / math.log(1 - single_guess_succ * p))
+        #edit in place 
+        N = n* params['k_dim']
+        params_estimate = LWE.Parameters(
+            n=N,
+            q=2**log_q,
+            Xs=ND.SparseBinomial(w, eta=2, n=N),
+            Xe=ND.CenteredBinomial(2),
+        )
+        cost = LWE.primal_hybrid(params_estimate,babai=False,mitm=False)
+        print(cost)
+        k = cost['zeta']
+
+        m_minimal = (cost['d']) - (N-k) - 1 #dim - secret and tau
+        print("m_min",m_minimal)
+        #essayons 
+        params['m'] = m_minimal
+        iterations = cost['repetitions']
+        beta = cost['beta']
+        params['beta'] = beta
+        params['k'] = k
         print(f"Number of iterations (for confidence level): {iterations}") # the max iterations before giving up
+        print(f"Attacking with n={n}, log_q={log_q}, w={w}, lwe_sigma={lwe_sigma}, beta={beta}, single_guess_succ={single_guess_succ}, k={k}, secret_type={secret_type}")
         lwe = primal_attack(params)
         n_cores = psutil.cpu_count(logical=False)
         workers = min(iterations, n_cores)
         #print("dimension of the lattice : ", lwe[0].shape)
         print(f"Number of CPU cores available: {n_cores}")
         #sv, target = drop_and_solve(lwe, params, 0)  # run the first iteration to see if it works
+        print("iterations before stop", iterations)
         for i in range(iterations):
             sv, target = drop_and_solve(lwe, params, i) 
             if (sv == target).all() or (sv == -target).all():

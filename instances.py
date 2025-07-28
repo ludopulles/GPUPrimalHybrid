@@ -90,7 +90,19 @@ from math import sqrt
 # def CBDRLWE(n: int, q: int, eta: int, err_std: float = 3.2):
 #     return RLWE(n, q, err_std=err_std, secr_distr=lambda: CBD(eta))
 
+from math import comb, sqrt
 
+def nu_scaled(n: int, k: int, w: int, eta: int, sigma: float) -> float:
+    """
+    Calcule nu pour un secret à poids exact w sur n-k positions,
+    non-zeros tirés de CBD_eta conditionnée à etre 0,
+    et erreur d'ecart-type sigma.
+    """
+    # 1) probabilité d'obtenir f=0 dans la CBD
+    P0 = comb(2*eta, eta) / (2**(2*eta))
+    # 2) facteur
+    return sigma * sqrt(2 * (n-k) * (1 - P0) / (w * eta))
+    
 def BaiGalCenteredScaledTernary(n: int, q: int, w: int, sigma: float, lwe: Tuple, k: int, m: int, columns_to_keep: List[int]):
     # [ 0, (y * q) I_m, 0 // -x I_{n-k} ,  y A2^t, 0 // 0, y (b - A2 (t One))^t, y]
     A, b, __s, __e = lwe
@@ -105,7 +117,8 @@ def BaiGalCenteredScaledTernary(n: int, q: int, w: int, sigma: float, lwe: Tuple
 
     # shift vector
     t = ZZ(w)/ZZ(n-k)
-    nu = sigma * (n - k) / sqrt(w * (n - k - w))
+    # nu = sigma * (n - k) / sqrt(w * (n - k - w))
+    nu = nu_scaled(n,k,w,2,sigma)
 
     # DON'T shift vector <-------------
     t = ZZ(0)
@@ -138,6 +151,7 @@ def BaiGalModuleLWE(
     n: int,         # degré cyclotomique de base
     q: int,
     w: int,         # Hamming weight target
+    M: int,
     sigma: float,
     module_lwe: tuple,  # (A_list, B_list, S_list, E_list, f)
     target_k: int,      # nombre de coord du secret à RECUPERER
@@ -150,14 +164,14 @@ def BaiGalModuleLWE(
 
     # 2) dimension totale
     N = len(s_eq)
-    M = len(b_eq)
+    # M = round(7*len(b_eq)/8)
 
     s_eq = balance(vector(Zmod(q), s_eq.tolist()), q)
 
     print("Secret :", s_eq)
-    print("hamming weight of it:", hamming_weight(s_eq))
-
-    return BaiGalCenteredScaledTernary(
+    # print("hamming weight of it:", hamming_weight(s_eq))
+    # print("n, q, w, sigma,k, m, eta =",N, q,w,sigma,target_k,M,2)
+    basis, target = BaiGalCenteredScaledTernary(
         n = N,
         q = q,
         w = w,
@@ -167,6 +181,14 @@ def BaiGalModuleLWE(
         m     = M,
         columns_to_keep = columns_to_keep
     )
+    # print("beta needed:", exact_norm_det_and_beta(N, q,w,sigma,target_k,M,2, basis.nrows())) # 2 is eta
+    # target_delta = (compute_delta_target(N, q,w,sigma,target_k,M,2))
+    # print("beta", find_beta_from_delta(float(target_delta)))
+    # print("dim", basis.nrows())
+    # print("over iterations", iterations_needed(N, target_k, w, 1))
+    # _,k,_,beta,_,_,_ = (optimize_k_dynamic_beta(N, w, M,q, sigma, 2))
+    # print(k,beta)
+    return basis,target
 
 # def qary_embedding(n: int, q: int, m: int, k: int = 0, sigma: float = 3.2):
 #     # creates a Bai-Galbraith embedding for m samples from the "uniform" distribution in the Decision-LWE game
