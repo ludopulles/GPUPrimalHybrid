@@ -130,7 +130,7 @@ def flatten_module_LWE(
 
     return A_eq, b_eq, s_eq, e_eq
 
-def CreateLWEInstance(n, log_q, m, w, lwe_sigma, type_of_secret='ternary', eta = None):
+def CreateLWEInstance(n, log_q, m, w, lwe_sigma, type_of_secret='ternary', eta = None, k_dim=None):
     """
     Create an LWE instance with the given parameters.
     """
@@ -141,9 +141,8 @@ def CreateLWEInstance(n, log_q, m, w, lwe_sigma, type_of_secret='ternary', eta =
         if not eta:
             raise ValueError(f"eta need to be defined")
         #only module k = 2 here
-        k = 2
-        A2, B2, S2, E2 = hamming_weight_fix_CBD_MLWE(n, q, k, k, eta, w)
+        A2, B2, S2, E2 = hamming_weight_fix_CBD_MLWE(n, q, k_dim, k_dim+1, eta, w)
 
-        return flatten_module_LWE(A2, B2, S2, E2, n, k, q, k)
+        return flatten_module_LWE(A2, B2, S2, E2, n, k_dim, q, k_dim+1)
     else:
         raise ValueError(f"Unsupported secret type: {type_of_secret}")

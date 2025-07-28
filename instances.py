@@ -152,7 +152,7 @@ def BaiGalModuleLWE(
     q: int,
     w: int,         # Hamming weight target
     M: int,
-    sigma: float,
+    eta:int,
     module_lwe: tuple,  # (A_list, B_list, S_list, E_list, f)
     target_k: int,      # nombre de coord du secret à RECUPERER
     columns_to_keep: list[int]
@@ -165,6 +165,7 @@ def BaiGalModuleLWE(
     # 2) dimension totale
     N = len(s_eq)
     # M = round(7*len(b_eq)/8)
+    sigma = sqrt(eta/2) # var of error
 
     s_eq = balance(vector(Zmod(q), s_eq.tolist()), q)
 
