@@ -15,29 +15,49 @@ from blaster import get_profile, slope, rhf
 # from hkz import hkz_kernel
 #from reduction import reduction
 
-def reduction(basis, beta, alg, target):
+def reduction(basis, beta, eta, alg, target):
     timestart = time.time()
     basis = np.array(basis, dtype=np.int64)
     B_np = basis.T
     print(f"try a progressive BKZ-{beta} on a {basis.shape} matrix") # i really think it's better to have a 2**n + 2**n+1 so k = 7n/8 - n/2 
-
+    target_norm = np.linalg.norm(target)
     #progressive starting by doing a DeepLLL
+    print("target norm", target_norm)
+    svp_needed = False
     bkz_prog = 2
-    if beta < 50:
-        list_beta = [20] # just do the DeepLLL
+    beta = beta + 10
+    if beta < 40:
+        list_beta = [beta] # just do the DeepLLL
     else:
-        list_beta = [20] + list(range(50 + ((beta - 50) % bkz_prog), beta + 1, bkz_prog))
+        list_beta = [30] + list(range(40 + ((beta - 40) % bkz_prog), beta + 1, bkz_prog))
+    if eta >= 40 and eta > beta:
+        list_beta += [eta]
+        svp_needed = True
+
     for beta in list_beta:
-        if beta < 50:
+        if beta < 40:
             print(f"just do a DeepLLL-{beta}")
-            _, B_np, _ = reduce(B_np, use_seysen=True, depth=beta, bkz_tours=1, cores=16, verbose=False, lll_size=72) #hkz_use=True, bkz_size=beta, this only for hkz
+            _, B_np, _ = reduce(B_np, use_seysen=True, depth=beta, bkz_tours=1, cores=16, verbose=False) #hkz_use=True, bkz_size=beta, this only for hkz
+        elif beta < 70:
+            if beta == eta and svp_needed:
+                print(f"try the SVP-{beta} at the start of the {basis.shape} matrix")
+                _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=1, cores=16, verbose=False, bkz_size=beta, svp_call=True)
+            else:
+                print(f"try a BKZ-{beta} on a {basis.shape} matrix")
+                _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=8, cores=16, verbose=False)
         else:
-            print(f"try a BKZ-{beta} on a {basis.shape} matrix")
-            _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=1, cores=16, verbose=False, lll_size=72)
-        # prof = get_profile(B_np)
-        # print('\nProfile = [' + ' '.join([f'{x:.2f}' for x in prof]) + ']\n'
-        #       f'RHF = {rhf(prof):.5f}^n, slope = {slope(prof):.6f}, '
-        #       f'∥b_1∥ = {2.0**prof[0]:.1f}')
+            if beta == eta and svp_needed:
+                print(f"try a SVP-{beta} with G6K on a {basis.shape} matrix")
+                _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=1, cores=16, verbose=False, svp_call=True)
+            else:
+
+                print(f"try a BKZ-{beta} like with G6K on a {basis.shape} matrix")
+                _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=1, cores=16, verbose=False, hkz_use=True)
+
+        prof = get_profile(B_np)
+        print('\nProfile = [' + ' '.join([f'{x:.2f}' for x in prof]) + ']\n'
+              f'RHF = {rhf(prof):.5f}^n, slope = {slope(prof):.6f}, '
+              f'∥b_1∥ = {2.0**prof[0]:.1f}')
             
         # print(np.array([(B_np[:, k] == target).all() or (B_np[:, k] == -target).all() for k in range(B_np.shape[1])]).any())
         if (B_np[:, 0] == target).all() or (B_np[:, 0] == -target).all(): # can be replace with a real test like test if the A*s-b small enough
@@ -78,12 +98,13 @@ def drop_and_solve(lwe, params, iteration):
     m = params['m']
     sigma = params['lwe_sigma']
     beta = params['beta']
+    eta_svp = params['eta_svp']
     
     #try k 
 
 
     # drop columns
-    print(f"Iteration {iteration}: starting drop")
+    # print(f"Iteration {iteration}: starting drop")
     _seed = int.from_bytes(os.urandom(4))
     # _seed = 0
     np.random.seed(_seed)
@@ -101,7 +122,7 @@ def drop_and_solve(lwe, params, iteration):
     if params["secret_type"] == "binomial":
         basis, target = BaiGalModuleLWE(n, q, w, m, params['eta'], lwe, k, columns_to_keep=columns_to_keep)
     print(f"Iteration {iteration}: starting solve")
-    reduced_basis, _ = reduction(basis, beta, "pbkz", target)
+    reduced_basis, _ = reduction(basis, beta,eta_svp, "pbkz", target)
     # check if the last column is the target
     # print(f"target: {target}")
     # print(f"reduced basis: {reduced_basis[0]}")
@@ -134,9 +155,7 @@ def next_power_or_sum(d: int) -> int:
 
     # ne garder que ceux >= d, puis prendre le plus petit
     candidats_sup = [x for x in candidats if x >= d]
-    if not candidats_sup:
-        # en théorie, on ne tombe jamais ici puisque 2^(n0+1) >= d
-        raise RuntimeError("Aucun candidat trouvé")
+    # et si d est proche du min du sup alors on prend celui ci 
     return min(candidats_sup)
 
 def attack(atk_params):
@@ -168,28 +187,40 @@ def attack(atk_params):
         #     params['m'] = n
         # else:
         params['m'] = round(7*n/8)
-
-        eta = params['eta']
+        if 'eta' in params:
+            eta = params['eta']
+        else:
+            params['eta'] = None
 
         #edit in place 
-        N = n* params['k_dim']
-        params_estimate = LWE.Parameters(
-            n=N,
-            q=2**log_q,
-            Xs=ND.SparseBinomial(w, eta=eta, n=N),
-            Xe=ND.CenteredBinomial(eta),
-        )
+        if secret_type == "binomial":
+            N = n* params['k_dim']
+            params_estimate = LWE.Parameters(
+                n=N,
+                q=2**log_q,
+                Xs=ND.SparseBinomial(w, eta=eta, n=N),
+                Xe=ND.CenteredBinomial(eta),
+            )
+        elif secret_type == "ternary":
+            N = n
+            params_estimate = LWE.Parameters(
+                n=N,
+                q=2**log_q,
+                Xs=ND.SparseTernary(n=n, p=w//2, m=(w-w//2)),
+                Xe=ND.DiscreteGaussian(sigma),
+            )
         cost = LWE.primal_hybrid(params_estimate,babai=False,mitm=False)
         print(cost)
         k = cost['zeta']
-
-        m_minimal = (cost['d']) - (N-k) - 1 #dim - secret and tau
+        m_minimal = (cost['d']) - (N-k) - 1
         print("m_min",m_minimal)
         #essayons 
         params['m'] = m_minimal
         iterations = cost['repetitions']
         beta = cost['beta']
+        eta_svp = cost['eta']
         params['beta'] = beta
+        params['eta_svp'] = eta_svp
         params['k'] = k
         print(f"Number of iterations (for confidence level): {iterations}") # the max iterations before giving up
         print(f"Attacking with n={n}, log_q={log_q}, w={w}, beta={beta}, k={k}, secret_type={secret_type}")
