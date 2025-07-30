@@ -1,0 +1,7 @@
+name: lwe_attack
+channels:
+  - conda-forge
+dependencies:
+  - sage
+  - python=3.12
+  - cupy

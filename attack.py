@@ -9,11 +9,27 @@ import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import threading
+import csv
+import traceback
 
 from blaster import reduce
 from blaster import get_profile, slope, rhf
 # from hkz import hkz_kernel
 #from reduction import reduction
+def assign_tours(list_beta, svp_needed):
+    n = len(list_beta)
+    if n == 1:
+        return [8]
+    tours = []
+    for idx, b in enumerate(list_beta):
+        # DeepLLL or SVP always 1 tour
+        if b < 40 or (svp_needed and b == list_beta[-1] and b > 70):
+            tours.append(1)
+        else:
+            # Linear decrease from 8 down to 1 over the intermediate paliers
+            t = round(8 - (7 * idx) / (n - 1))
+            tours.append(int(t))
+    return tours
 
 def reduction(basis, beta, eta, alg, target):
     timestart = time.time()
@@ -24,18 +40,19 @@ def reduction(basis, beta, eta, alg, target):
     #progressive starting by doing a DeepLLL
     print("target norm", target_norm)
     svp_needed = False
-    bkz_prog = 2
-    beta = beta + 10
-    if beta < 40:
-        list_beta = [beta] # just do the DeepLLL
+    bkz_prog = 5
+    if beta < 50:
+        list_beta = [10] + [beta] # just do the beta without progressive just small basis improvement
+    elif beta <70:
+        list_beta = [30] + list(range(50 + ((beta - 50) % bkz_prog), beta + 1, bkz_prog)) # pruning need good quality basis for be faster so here progressive
     else:
-        list_beta = [30] + list(range(40 + ((beta - 40) % bkz_prog), beta + 1, bkz_prog))
-    if eta >= 40 and eta > beta:
+        list_beta = [30] + [beta] # just call DeepLLL30, it's nothing compared to 8 * d * G6K call on beta, and sieving don't need good quality basis so only call it
+    if eta >= 50 and eta > beta:
         list_beta += [eta]
         svp_needed = True
-
-    for beta in list_beta:
-        if beta < 40:
+    tours = assign_tours(list_beta, svp_needed)
+    for i, beta in enumerate(list_beta):
+        if beta <= 40:
             print(f"just do a DeepLLL-{beta}")
             _, B_np, _ = reduce(B_np, use_seysen=True, depth=beta, bkz_tours=1, cores=16, verbose=False) #hkz_use=True, bkz_size=beta, this only for hkz
         elif beta < 70:
@@ -44,7 +61,7 @@ def reduction(basis, beta, eta, alg, target):
                 _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=1, cores=16, verbose=False, bkz_size=beta, svp_call=True)
             else:
                 print(f"try a BKZ-{beta} on a {basis.shape} matrix")
-                _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=8, cores=16, verbose=False)
+                _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=tours[i], cores=16, verbose=False, bkz_size=72)
         else:
             if beta == eta and svp_needed:
                 print(f"try a SVP-{beta} with G6K on a {basis.shape} matrix")
@@ -52,7 +69,7 @@ def reduction(basis, beta, eta, alg, target):
             else:
 
                 print(f"try a BKZ-{beta} like with G6K on a {basis.shape} matrix")
-                _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=1, cores=16, verbose=False, hkz_use=True)
+                _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=tours[i], cores=16, verbose=False, hkz_use=True)
 
         prof = get_profile(B_np)
         print('\nProfile = [' + ' '.join([f'{x:.2f}' for x in prof]) + ']\n'
@@ -75,7 +92,7 @@ def primal_attack(atk_params):
     """
     create the LWE instance.
     """
-    lwe = CreateLWEInstance(atk_params['n'], atk_params['log_q'], atk_params['m'], atk_params['w'], atk_params['lwe_sigma'], type_of_secret=atk_params['secret_type'], eta = (atk_params['eta'] if 'eta' in atk_params else None),k_dim = (atk_params['k_dim'] if 'k_dim' in atk_params else None))
+    lwe = CreateLWEInstance(atk_params['n'], atk_params['log_q'], atk_params['m'], atk_params['w'], atk_params.get('lwe_sigma'), type_of_secret=atk_params['secret_type'], eta = (atk_params['eta'] if 'eta' in atk_params else None),k_dim = (atk_params['k_dim'] if 'k_dim' in atk_params else None))
     A, b, s, e = lwe
     q = 2 ** atk_params['log_q']
     #assert ((np.dot(A, s) + e) % q == b).all(), "LWE instance is not valid"
@@ -96,7 +113,8 @@ def drop_and_solve(lwe, params, iteration):
     w = params['w']
     q = 2 ** params['log_q']
     m = params['m']
-    sigma = params['lwe_sigma']
+    sigma = params.get('lwe_sigma')
+    eta = params.get('eta')
     beta = params['beta']
     eta_svp = params['eta_svp']
     
@@ -106,7 +124,7 @@ def drop_and_solve(lwe, params, iteration):
     # drop columns
     # print(f"Iteration {iteration}: starting drop")
     _seed = int.from_bytes(os.urandom(4))
-    # _seed = 0
+    #_seed = 0
     np.random.seed(_seed)
     if 'k_dim' in params:
         _,_,s,_ = lwe
@@ -120,7 +138,7 @@ def drop_and_solve(lwe, params, iteration):
     if params["secret_type"] == "ternary":
         basis, target = BaiGalCenteredScaledTernary(n, q, w, sigma, lwe, k, m, columns_to_keep=columns_to_keep)
     if params["secret_type"] == "binomial":
-        basis, target = BaiGalModuleLWE(n, q, w, m, params['eta'], lwe, k, columns_to_keep=columns_to_keep)
+        basis, target = BaiGalModuleLWE(n, q, w, m, eta, lwe, k, columns_to_keep=columns_to_keep)
     print(f"Iteration {iteration}: starting solve")
     reduced_basis, _ = reduction(basis, beta,eta_svp, "pbkz", target)
     # check if the last column is the target
@@ -158,108 +176,90 @@ def next_power_or_sum(d: int) -> int:
     # et si d est proche du min du sup alors on prend celui ci 
     return min(candidats_sup)
 
-def attack(atk_params):
-    """
-    Perform an attack based on the provided parameters.
-    
-    Parameters:
-    atk_params (list): A list of dictionaries containing attack parameters.
-    
-    Returns:
-    None
-    """
-    for params in atk_params:
-        n = params['n']
-        log_q = params['log_q']
-        w = params['w']
-        if 'lwe_sigma' in params:
-            sigma = params['lwe_sigma']
-        else:
-            params['lwe_sigma'] = None
-        if 'single_guess_succ' in params:
-            single_guess_succ = params['single_guess_succ']
-        else:
-            params['single_guess_succ'] = None
-        #k = params['k']
 
-        secret_type = params['secret_type']
-        # if 'k_dim' in params:
-        #     params['m'] = n
-        # else:
-        params['m'] = round(7*n/8)
-        if 'eta' in params:
-            eta = params['eta']
-        else:
-            params['eta'] = None
+def run_single_attack(params, run_id):
+    start_time = time.time()
+    result = {
+        'run_id': run_id,
+        'n': params['n'],
+        'log_q': params['log_q'],
+        'w': params['w'],
+        'secret_type': params['secret_type'],
+        'sigma': params.get('lwe_sigma'),
+        'eta': params.get('eta'),
+        'success': False,
+        'iterations_used': 0,
+        'time_elapsed': None,
+        'error': None
+    }
 
-        #edit in place 
-        if secret_type == "binomial":
-            N = n* params['k_dim']
+    try:
+        params = params.copy()
+        params['m'] = round(7 * params['n'] / 8)
+        if params['secret_type'] == "binomial":
+            N = params['n'] * params['k_dim']
             params_estimate = LWE.Parameters(
                 n=N,
-                q=2**log_q,
-                Xs=ND.SparseBinomial(w, eta=eta, n=N),
-                Xe=ND.CenteredBinomial(eta),
+                q=2**params['log_q'],
+                Xs=ND.SparseBinomial(params['w'], eta=params['eta'], n=N),
+                Xe=ND.CenteredBinomial(params['eta']),
             )
-        elif secret_type == "ternary":
-            N = n
+        else:
+            N = params['n']
             params_estimate = LWE.Parameters(
                 n=N,
-                q=2**log_q,
-                Xs=ND.SparseTernary(n=n, p=w//2, m=(w-w//2)),
-                Xe=ND.DiscreteGaussian(sigma),
+                q=2**params['log_q'],
+                Xs=ND.SparseTernary(n=N, p=params['w']//2, m=(params['w'] - params['w']//2)),
+                Xe=ND.DiscreteGaussian(params['lwe_sigma']),
             )
-        cost = LWE.primal_hybrid(params_estimate,babai=False,mitm=False)
-        print(cost)
+        cost = LWE.primal_hybrid(params_estimate, babai=False, mitm=False)
         k = cost['zeta']
-        m_minimal = (cost['d']) - (N-k) - 1
-        print("m_min",m_minimal)
-        #essayons 
+        m_minimal = cost['d'] - (N - k) - 1
         params['m'] = m_minimal
-        iterations = cost['repetitions']
-        beta = cost['beta']
-        eta_svp = cost['eta']
-        params['beta'] = beta
-        params['eta_svp'] = eta_svp
         params['k'] = k
-        print(f"Number of iterations (for confidence level): {iterations}") # the max iterations before giving up
-        print(f"Attacking with n={n}, log_q={log_q}, w={w}, beta={beta}, k={k}, secret_type={secret_type}")
+        params['beta'] = cost['beta']
+        params['eta_svp'] = cost['eta']
+        iterations = cost['repetitions']
+
         lwe = primal_attack(params)
-        n_cores = psutil.cpu_count(logical=False)
-        workers = min(iterations, n_cores)
-        #print("dimension of the lattice : ", lwe[0].shape)
-        print(f"Number of CPU cores available: {n_cores}")
-        #sv, target = drop_and_solve(lwe, params, 0)  # run the first iteration to see if it works
-        print("iterations before stop", iterations)
+        cores = psutil.cpu_count(logical=False)
+        result['available_cores'] = cores
+
         for i in range(iterations):
-            sv, target = drop_and_solve(lwe, params, i) 
-            if (sv == target).all() or (sv == -target).all():
-                print(f"Found a solution in iteration {i}: {sv}")
+            sv, target = drop_and_solve(lwe, params, i)
+            result['iterations_used'] = i + 1
+            if (sv == target).all():
+                result['success'] = True
                 break
-        # with ThreadPoolExecutor(max_workers=workers) as exe:
-        #     # Submit the drop and solve task to the executor
-        #     futures = [exe.submit(drop_and_solve, lwe, params, i)
-        #        for i in range(iterations)]
-        #     for fut in as_completed(futures):
-        #         try:
-        #             result = fut.result()   # will re‐raise if drop_and_solve errored
-        #             sv, target = result
-        #             if (sv == target).all() or (sv == -target).all():
-        #                 print(f"Found a solution in iteration {futures.index(fut)}: {sv}")
-        #                 stop_event.set()
-        #                 for other in futures:
-        #                     if not other.done():
-        #                         other.cancel()
-        #                 break
 
-        #         except Exception as e:
-        #             # A task failed (or returned an exception)—you can log or ignore
-        #             print("One iteration failed:", e)
-            
+    except Exception:
+        result['error'] = traceback.format_exc()
 
+    finally:
+        result['time_elapsed'] = time.time() - start_time
 
+    return result
 
+def batch_attack(atk_params, repeats=3, output_csv='attack_results.csv'):
+    fieldnames = [
+        'run_id', 'n', 'log_q', 'w', 'secret_type', 'sigma', 'eta',
+        'available_cores', 'success', 'iterations_used', 'time_elapsed', 'error'
+    ]
+    run_id = 0
+
+    with open(output_csv, 'w', newline='') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for params in atk_params:
+            for r in range(repeats):
+                run_id += 1
+                result = run_single_attack(params, run_id)
+                writer.writerow(result)
+                print(f"Run {run_id}: Success={result['success']}, Time={result['time_elapsed']:.2f}s, Iter={result['iterations_used']}, Error={result['error'] is not None}")
+
+    print(f"\nAll runs completed. Results saved to {output_csv}")
 
 if __name__ == "__main__":
     from attack_params import atk_params
-    attack(atk_params)
+    batch_attack(atk_params)
