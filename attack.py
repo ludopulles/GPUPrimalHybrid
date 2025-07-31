@@ -1,7 +1,7 @@
 import math
 
 from lwe import CreateLWEInstance
-from instances import BaiGalCenteredScaledTernary, BaiGalModuleLWE
+from instances import BaiGalCenteredScaledTernary, BaiGalModuleLWE, estimate_target_upper_bound, estimate_target_upper_bound_concat_full
 
 import psutil
 import os
@@ -11,6 +11,7 @@ import time
 import threading
 import csv
 import traceback
+import matplotlib.pyplot as plt
 
 from blaster import reduce
 from blaster import get_profile, slope, rhf
@@ -31,55 +32,62 @@ def assign_tours(list_beta, svp_needed):
             tours.append(int(t))
     return tours
 
-def reduction(basis, beta, eta, alg, target):
+def reduction(basis, beta, eta, alg, target, target_estimation):
     timestart = time.time()
     basis = np.array(basis, dtype=np.int64)
     B_np = basis.T
+
+    beta = beta + 10 # always more than predicted to be sure to catch it
+    
     print(f"try a progressive BKZ-{beta} on a {basis.shape} matrix") # i really think it's better to have a 2**n + 2**n+1 so k = 7n/8 - n/2 
     target_norm = np.linalg.norm(target)
     #progressive starting by doing a DeepLLL
+    print("target",target)
     print("target norm", target_norm)
+    print("target norm estimation", target_estimation)
     svp_needed = False
     bkz_prog = 5
+    #eta is also just a minimum, for the moment it's beetween eta and 100, by estimation with gaussian heuristic
     if beta < 50:
-        list_beta = [10] + [beta] # just do the beta without progressive just small basis improvement
-    elif beta <70:
-        list_beta = [30] + list(range(50 + ((beta - 50) % bkz_prog), beta + 1, bkz_prog)) # pruning need good quality basis for be faster so here progressive
+        list_beta = [30] + [beta]
     else:
-        list_beta = [30] + [beta] # just call DeepLLL30, it's nothing compared to 8 * d * G6K call on beta, and sieving don't need good quality basis so only call it
-    if eta >= 50 and eta > beta:
-        list_beta += [eta]
-        svp_needed = True
-    tours = assign_tours(list_beta, svp_needed)
+        list_beta = [30] + list(range(50 + ((beta - 50) % bkz_prog), beta + 1, bkz_prog)) # pruning need good quality basis for be faster so here progressive
     for i, beta in enumerate(list_beta):
-        if beta <= 40:
+        if beta < 40:
             print(f"just do a DeepLLL-{beta}")
             _, B_np, _ = reduce(B_np, use_seysen=True, depth=beta, bkz_tours=1, cores=16, verbose=False) #hkz_use=True, bkz_size=beta, this only for hkz
-        elif beta < 70:
-            if beta == eta and svp_needed:
-                print(f"try the SVP-{beta} at the start of the {basis.shape} matrix")
-                _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=1, cores=16, verbose=False, bkz_size=beta, svp_call=True)
-            else:
+        elif beta < 64:
                 print(f"try a BKZ-{beta} on a {basis.shape} matrix")
-                _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=tours[i], cores=16, verbose=False, bkz_size=72)
+                _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=8, cores=16, verbose=False)
         else:
-            if beta == eta and svp_needed:
-                print(f"try a SVP-{beta} with G6K on a {basis.shape} matrix")
-                _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=1, cores=16, verbose=False, svp_call=True)
-            else:
-
                 print(f"try a BKZ-{beta} like with G6K on a {basis.shape} matrix")
-                _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=tours[i], cores=16, verbose=False, hkz_use=True)
-
+                _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=1, cores=16, verbose=False, hkz_use=True)
         prof = get_profile(B_np)
         print('\nProfile = [' + ' '.join([f'{x:.2f}' for x in prof]) + ']\n'
               f'RHF = {rhf(prof):.5f}^n, slope = {slope(prof):.6f}, '
               f'∥b_1∥ = {2.0**prof[0]:.1f}')
-            
+        positions = list(range(len(prof)))
+
+        # Tracé
+        plt.figure(figsize=(8, 4))
+        plt.plot(positions, prof, marker='o', linestyle='-')
+        plt.title('Profil vs Position')
+        plt.xlabel('Position (index)')
+        plt.ylabel('Valeur du profil')
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+                    
         # print(np.array([(B_np[:, k] == target).all() or (B_np[:, k] == -target).all() for k in range(B_np.shape[1])]).any())
         if (B_np[:, 0] == target).all() or (B_np[:, 0] == -target).all(): # can be replace with a real test like test if the A*s-b small enough
             print("we find the target vector")
             break
+    if (B_np[:, 0] == target).all() or (B_np[:, 0] == -target).all():
+        finish = time.time()
+        return B_np.T, finish - timestart
+    if eta:
+        print(f"try a SVP-{eta} with G6K on a {basis.shape} matrix")
+        _, B_np, _ = reduce(B_np, use_seysen=True, beta=eta, bkz_tours=1, cores=16, verbose=False, svp_call=True, target = target_estimation**2)
     # for blocksize in range(40, beta+1):
     #     _, B_np, _ = reduce(B_np, use_seysen=True, beta=blocksize, bkz_tours=1)
     #     if (B_np[:, 0] == target).all() or (B_np[:, 0] == -target).all(): 
@@ -140,7 +148,8 @@ def drop_and_solve(lwe, params, iteration):
     if params["secret_type"] == "binomial":
         basis, target = BaiGalModuleLWE(n, q, w, m, eta, lwe, k, columns_to_keep=columns_to_keep)
     print(f"Iteration {iteration}: starting solve")
-    reduced_basis, _ = reduction(basis, beta,eta_svp, "pbkz", target)
+    estimation = estimate_target_upper_bound_concat_full(n*params['k_dim'], w, math.sqrt(eta/2), k, m, eta)
+    reduced_basis, _ = reduction(basis, beta,eta_svp, "pbkz", target, estimation)
     # check if the last column is the target
     # print(f"target: {target}")
     # print(f"reduced basis: {reduced_basis[0]}")
@@ -213,6 +222,7 @@ def run_single_attack(params, run_id):
                 Xe=ND.DiscreteGaussian(params['lwe_sigma']),
             )
         cost = LWE.primal_hybrid(params_estimate, babai=False, mitm=False)
+        print(cost)
         k = cost['zeta']
         m_minimal = cost['d'] - (N - k) - 1
         params['m'] = m_minimal
@@ -228,7 +238,7 @@ def run_single_attack(params, run_id):
         for i in range(iterations):
             sv, target = drop_and_solve(lwe, params, i)
             result['iterations_used'] = i + 1
-            if (sv == target).all():
+            if np.array_equal(sv, target) or np.array_equal(sv, -target):
                 result['success'] = True
                 break
 
@@ -237,13 +247,17 @@ def run_single_attack(params, run_id):
 
     finally:
         result['time_elapsed'] = time.time() - start_time
+        if result['iterations_used'] > 0:
+            result['estimated_time'] = result['time_elapsed'] * result['iterations_used']
+        else:
+            result['estimated_time'] = None
 
     return result
 
-def batch_attack(atk_params, repeats=3, output_csv='attack_results.csv'):
+def batch_attack(atk_params, repeats=1, output_csv='attack_results.csv'):
     fieldnames = [
         'run_id', 'n', 'log_q', 'w', 'secret_type', 'sigma', 'eta',
-        'available_cores', 'success', 'iterations_used', 'time_elapsed', 'error'
+        'available_cores', 'success', 'iterations_used', 'time_elapsed', 'estimated_time', 'error'
     ]
     run_id = 0
 

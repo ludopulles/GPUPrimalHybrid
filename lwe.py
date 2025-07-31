@@ -153,7 +153,7 @@ def CreateLWEInstance(n, log_q, m, w, lwe_sigma, type_of_secret='ternary', eta =
     Create an LWE instance with the given parameters.
     """
     q = 2 ** log_q
-    set_random_seed(0)
+    # set_random_seed(0)
     if type_of_secret == 'ternary':
         return SpTerLWE(n, m, q, w, err_std=lwe_sigma)
     elif type_of_secret == 'binomial':
