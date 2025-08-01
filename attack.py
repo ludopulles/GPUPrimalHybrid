@@ -1,7 +1,7 @@
 import math
 
 from lwe import CreateLWEInstance
-from instances import BaiGalCenteredScaledTernary, BaiGalModuleLWE, estimate_target_upper_bound, estimate_target_upper_bound_concat_full
+from instances import BaiGalCenteredScaledTernary, BaiGalModuleLWE, estimate_target_upper_bound_binomial, estimate_target_upper_bound_ternary
 
 import psutil
 import os
@@ -12,6 +12,9 @@ import threading
 import csv
 import traceback
 import matplotlib.pyplot as plt
+
+from utilities import approx_nu
+from sage.all import Matrix, GF, vector
 
 from blaster import reduce
 from blaster import get_profile, slope, rhf
@@ -36,8 +39,6 @@ def reduction(basis, beta, eta, alg, target, target_estimation):
     timestart = time.time()
     basis = np.array(basis, dtype=np.int64)
     B_np = basis.T
-
-    beta = beta + 10 # always more than predicted to be sure to catch it
     
     print(f"try a progressive BKZ-{beta} on a {basis.shape} matrix") # i really think it's better to have a 2**n + 2**n+1 so k = 7n/8 - n/2 
     target_norm = np.linalg.norm(target)
@@ -46,19 +47,21 @@ def reduction(basis, beta, eta, alg, target, target_estimation):
     print("target norm", target_norm)
     print("target norm estimation", target_estimation)
     svp_needed = False
-    bkz_prog = 5
-    #eta is also just a minimum, for the moment it's beetween eta and 100, by estimation with gaussian heuristic
+    bkz_prog = 2
+    final_beta = beta
+    #eta is also just a minimum, it can be increased by estimation with gaussian heuristic (see svp_kernel)
     if beta < 50:
-        list_beta = [30] + [beta]
+        final_beta = beta + 10
+        list_beta = [30] + list(range(40 + ((beta - 40) % bkz_prog), final_beta + 1, bkz_prog))
     else:
-        list_beta = [30] + list(range(50 + ((beta - 50) % bkz_prog), beta + 1, bkz_prog)) # pruning need good quality basis for be faster so here progressive
+        list_beta = [30] + list(range(40 + ((beta - 40) % bkz_prog), beta + 1, bkz_prog)) # pruning need good quality basis for be faster so here progressive
     for i, beta in enumerate(list_beta):
         if beta < 40:
             print(f"just do a DeepLLL-{beta}")
             _, B_np, _ = reduce(B_np, use_seysen=True, depth=beta, bkz_tours=1, cores=16, verbose=False) #hkz_use=True, bkz_size=beta, this only for hkz
         elif beta < 64:
                 print(f"try a BKZ-{beta} on a {basis.shape} matrix")
-                _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=8, cores=16, verbose=False)
+                _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=(8 if beta == final_beta else 1), cores=16, verbose=False)
         else:
                 print(f"try a BKZ-{beta} like with G6K on a {basis.shape} matrix")
                 _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=1, cores=16, verbose=False, hkz_use=True)
@@ -68,17 +71,16 @@ def reduction(basis, beta, eta, alg, target, target_estimation):
               f'∥b_1∥ = {2.0**prof[0]:.1f}')
         positions = list(range(len(prof)))
 
-        # Tracé
-        plt.figure(figsize=(8, 4))
-        plt.plot(positions, prof, marker='o', linestyle='-')
-        plt.title('Profil vs Position')
-        plt.xlabel('Position (index)')
-        plt.ylabel('Valeur du profil')
-        plt.grid(True)
-        plt.tight_layout()
-        plt.show()
+        # # # Tracé
+        # plt.figure(figsize=(8, 4))
+        # plt.plot(positions, prof, marker='o', linestyle='-')
+        # plt.title('Profil vs Position')
+        # plt.xlabel('Position (index)')
+        # plt.ylabel('Valeur du profil')
+        # plt.grid(True)
+        # plt.tight_layout()
+        # plt.show()
                     
-        # print(np.array([(B_np[:, k] == target).all() or (B_np[:, k] == -target).all() for k in range(B_np.shape[1])]).any())
         if (B_np[:, 0] == target).all() or (B_np[:, 0] == -target).all(): # can be replace with a real test like test if the A*s-b small enough
             print("we find the target vector")
             break
@@ -105,6 +107,8 @@ def primal_attack(atk_params):
     q = 2 ** atk_params['log_q']
     #assert ((np.dot(A, s) + e) % q == b).all(), "LWE instance is not valid"
     return lwe
+
+from itertools import combinations, product
 
 def drop_and_solve(lwe, params, iteration):
     """
@@ -145,15 +149,39 @@ def drop_and_solve(lwe, params, iteration):
     #build the embedding 
     if params["secret_type"] == "ternary":
         basis, target = BaiGalCenteredScaledTernary(n, q, w, sigma, lwe, k, m, columns_to_keep=columns_to_keep)
+        estimation = estimate_target_upper_bound_ternary(n, w, sigma, k, m)
     if params["secret_type"] == "binomial":
         basis, target = BaiGalModuleLWE(n, q, w, m, eta, lwe, k, columns_to_keep=columns_to_keep)
+        estimation = estimate_target_upper_bound_binomial(n*params['k_dim'], w, math.sqrt(eta/2), k, m, eta)
     print(f"Iteration {iteration}: starting solve")
-    estimation = estimate_target_upper_bound_concat_full(n*params['k_dim'], w, math.sqrt(eta/2), k, m, eta)
+    
     reduced_basis, _ = reduction(basis, beta,eta_svp, "pbkz", target, estimation)
     # check if the last column is the target
     # print(f"target: {target}")
     # print(f"reduced basis: {reduced_basis[0]}")
-    return reduced_basis[0], target
+    target_precompute = target
+    target = reduced_basis[0]
+    
+    #here reconstruct the real vector so 
+    # N = params['k_dim']*n
+    # nu = math.sqrt(eta/2) * math.sqrt((N - k) / (w* eta))
+    # x, y = approx_nu(nu)
+    # # use target but it reduced_basis in fact
+    # s2 = target[:N-k]/x
+    # e2 = target[N-k:-1]/y
+
+
+    # #hamming weight of s2
+    # A,b,__s,_ = lwe
+    # hw = (sum([1 for i in range(len(s2)) if s2[i] != 0]))
+    # print(hw)
+    # print(w)
+    # seuil = 2
+    # s_full = np.zeros(N, dtype=np.int64)
+    # for idx, col in enumerate(columns_to_keep):
+    #     s_full[col] = (s2[idx])
+
+    return target, target_precompute
 
 from estimator import *
 

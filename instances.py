@@ -146,14 +146,14 @@ def nu_scaled(n: int, k: int, w: int, eta: int, sigma: float) -> float:
     return sigma * sqrt(2 * (n-k) * (1 - P0) / (w * eta))
     
 
-def estimate_target_upper_bound(n, w, sigma, k, m, eta):
+def estimate_target_upper_bound_binomial(n, w, sigma, k, m, eta):
     """
     Calcule une borne supérieure sur la norme du vecteur cible.
     
     - On utilise ceil(sigma) pour majorer les composantes d'erreur.
     """
     # Calcul de nu
-    nu = sigma * sqrt((n - k) / w)
+    nu = sigma * sqrt((n - k) / (w*eta))
     # Approximation rationnelle nu
     x, y = approx_nu(nu)
     
@@ -163,8 +163,30 @@ def estimate_target_upper_bound(n, w, sigma, k, m, eta):
         np.full(m, y * sigma),      # erreur
         [y * sigma]                 # coefficient Kannan
     ])
+    
+    # Borne supérieure de la norme
+    bound_sup = np.linalg.norm(vec_bound)
+    return bound_sup
 
-    print(vec_bound)
+
+
+def estimate_target_upper_bound_ternary(n, w, sigma, k, m):
+    """
+    Calcule une borne supérieure sur la norme du vecteur cible.
+    
+    - On utilise ceil(sigma) pour majorer les composantes d'erreur.
+    """
+    # Calcul de nu
+    nu = sigma * sqrt((n - k) / (w))
+    # Approximation rationnelle nu
+    x, y = approx_nu(nu)
+    
+    # Construction du vecteur de borne
+    vec_bound = np.concatenate([
+        np.full(w, x),      # secret
+        np.full(m, y * sigma),      # erreur
+        [y * sigma]                 # coefficient Kannan
+    ])
     
     # Borne supérieure de la norme
     bound_sup = np.linalg.norm(vec_bound)
@@ -182,7 +204,7 @@ def estimate_target_upper_bound_concat_full(n, w, sigma, k, m, eta,
     secret de dimension w, p = eta/w
     erreur ~ N(0, sigma^2 I_m)
     """
-    nu = sigma * sqrt((n - k) / w)
+    nu = sigma * sqrt((n - k) / (w*eta))
     x, y = approx_nu(nu)
     p_secret = eta / float(w)
     b_secret = int(binom.ppf(1 - delta, w, p_secret))
@@ -197,7 +219,7 @@ def estimate_target_upper_bound_concat_full(n, w, sigma, k, m, eta,
     ])
 
     # 5) norme Euclidienne
-    return float(np.linalg.norm(vec_bound))
+    return (np.linalg.norm(vec_bound))
 
 
 def BaiGalCenteredScaledBinomial(n: int, q: int, w: int, sigma: float, lwe: Tuple, eta:int, k: int, m: int, columns_to_keep: List[int]):
@@ -214,7 +236,7 @@ def BaiGalCenteredScaledBinomial(n: int, q: int, w: int, sigma: float, lwe: Tupl
 
     # shift vector
     t = ZZ(w)/ZZ(n-k)
-    nu = sigma * sqrt((n - k) / w)
+    nu = sigma * sqrt((n - k) / (w * eta))
 
     # DON'T shift vector <-------------
     t = ZZ(0)
