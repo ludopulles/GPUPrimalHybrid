@@ -14,7 +14,6 @@ import traceback
 import matplotlib.pyplot as plt
 
 from utilities import approx_nu
-from sage.all import Matrix, GF, vector
 
 from blaster import reduce
 from blaster import get_profile, slope, rhf
@@ -50,11 +49,7 @@ def reduction(basis, beta, eta, alg, target, target_estimation):
     bkz_prog = 2
     final_beta = beta
     #eta is also just a minimum, it can be increased by estimation with gaussian heuristic (see svp_kernel)
-    if beta < 50:
-        final_beta = beta + 10
-        list_beta = [30] + list(range(40 + ((beta - 40) % bkz_prog), final_beta + 1, bkz_prog))
-    else:
-        list_beta = [30] + list(range(40 + ((beta - 40) % bkz_prog), beta + 1, bkz_prog)) # pruning need good quality basis for be faster so here progressive
+    list_beta = [30] + list(range(40 + ((beta - 40) % bkz_prog), beta + 1, bkz_prog)) # pruning need good quality basis for be faster so here progressive
     for i, beta in enumerate(list_beta):
         if beta < 40:
             print(f"just do a DeepLLL-{beta}")
@@ -107,8 +102,6 @@ def primal_attack(atk_params):
     q = 2 ** atk_params['log_q']
     #assert ((np.dot(A, s) + e) % q == b).all(), "LWE instance is not valid"
     return lwe
-
-from itertools import combinations, product
 
 def drop_and_solve(lwe, params, iteration):
     """
