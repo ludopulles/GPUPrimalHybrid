@@ -17,7 +17,6 @@ from utilities import approx_nu
 
 from blaster import reduce
 from blaster import get_profile, slope, rhf
-# from hkz import hkz_kernel
 #from reduction import reduction
 def assign_tours(list_beta, svp_needed):
     n = len(list_beta)
@@ -53,13 +52,16 @@ def reduction(basis, beta, eta, target, target_estimation):
     for i, beta in enumerate(list_beta):
         if beta < 40:
             print(f"just do a DeepLLL-{beta}")
-            _, B_np, _ = reduce(B_np, use_seysen=True, bkz_tours=1, cores=16, verbose=False) #hkz_use=True, bkz_size=beta, this only for hkz
+            _, B_np, _ = reduce(B_np, use_seysen=True, bkz_tours=1, cores=16, verbose=False) #g6k_use=True, bkz_size=beta, this only for g6k_use
         elif beta < 64:
                 print(f"try a BKZ-{beta} on a {basis.shape} matrix")
                 _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=(tours_final if beta == final_beta else 1), cores=16, verbose=False)
+        elif beta <90:
+            continue
+            #maybe if beta < 90 do it on the CPU g6K
         else:
                 print(f"try a BKZ-{beta} like with G6K on a {basis.shape} matrix")
-                _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=1, cores=16, verbose=False, hkz_use=True)
+                _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=1, cores=16, verbose=False, g6k_use=True)
         # print('\nProfile = [' + ' '.join([f'{x:.2f}' for x in prof]) + ']\n'
         #       f'RHF = {rhf(prof):.5f}^n, slope = {slope(prof):.6f}, '
         #       f'∥b_1∥ = {2.0**prof[0]:.1f}')
