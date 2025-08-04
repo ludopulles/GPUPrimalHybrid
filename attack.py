@@ -34,11 +34,11 @@ def assign_tours(list_beta, svp_needed):
             tours.append(int(t))
     return tours
 
-def reduction(basis, beta, eta, alg, target, target_estimation):
+def reduction(basis, beta, eta, target, target_estimation):
     timestart = time.time()
     basis = np.array(basis, dtype=np.int64)
     B_np = basis.T
-    
+    final_beta = beta
     print(f"try a progressive BKZ-{beta} on a {basis.shape} matrix") # i really think it's better to have a 2**n + 2**n+1 so k = 7n/8 - n/2 
     target_norm = np.linalg.norm(target)
     #progressive starting by doing a DeepLLL
@@ -46,60 +46,94 @@ def reduction(basis, beta, eta, alg, target, target_estimation):
     print("target norm", target_norm)
     print("target norm estimation", target_estimation)
     svp_needed = False
-    bkz_prog = 2
-    final_beta = beta
+    bkz_prog = 10
+    tours_final = 1
     #eta is also just a minimum, it can be increased by estimation with gaussian heuristic (see svp_kernel)
-    list_beta = [30] + list(range(40 + ((beta - 40) % bkz_prog), beta + 1, bkz_prog)) # pruning need good quality basis for be faster so here progressive
+    list_beta = list(range(40 + ((beta - 40) % bkz_prog), beta + 1, bkz_prog)) # pruning need good quality basis for be faster so here progressive
     for i, beta in enumerate(list_beta):
         if beta < 40:
             print(f"just do a DeepLLL-{beta}")
-            _, B_np, _ = reduce(B_np, use_seysen=True, depth=beta, bkz_tours=1, cores=16, verbose=False) #hkz_use=True, bkz_size=beta, this only for hkz
+            _, B_np, _ = reduce(B_np, use_seysen=True, bkz_tours=1, cores=16, verbose=False) #hkz_use=True, bkz_size=beta, this only for hkz
         elif beta < 64:
                 print(f"try a BKZ-{beta} on a {basis.shape} matrix")
-                _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=(8 if beta == final_beta else 1), cores=16, verbose=False)
+                _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=(tours_final if beta == final_beta else 1), cores=16, verbose=False)
         else:
                 print(f"try a BKZ-{beta} like with G6K on a {basis.shape} matrix")
                 _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=1, cores=16, verbose=False, hkz_use=True)
-        prof = get_profile(B_np)
-        print('\nProfile = [' + ' '.join([f'{x:.2f}' for x in prof]) + ']\n'
-              f'RHF = {rhf(prof):.5f}^n, slope = {slope(prof):.6f}, '
-              f'∥b_1∥ = {2.0**prof[0]:.1f}')
-        positions = list(range(len(prof)))
+        # print('\nProfile = [' + ' '.join([f'{x:.2f}' for x in prof]) + ']\n'
+        #       f'RHF = {rhf(prof):.5f}^n, slope = {slope(prof):.6f}, '
+        #       f'∥b_1∥ = {2.0**prof[0]:.1f}')
 
-        # # # Tracé
-        # plt.figure(figsize=(8, 4))
-        # plt.plot(positions, prof, marker='o', linestyle='-')
-        # plt.title('Profil vs Position')
-        # plt.xlabel('Position (index)')
-        # plt.ylabel('Valeur du profil')
-        # plt.grid(True)
-        # plt.tight_layout()
-        # plt.show()
-                    
-        if (B_np[:, 0] == target).all() or (B_np[:, 0] == -target).all(): # can be replace with a real test like test if the A*s-b small enough
-            print("we find the target vector")
+        #target norm projected intersection
+        #where target norm * (blockszize)/ dim < r0 
+    # if (B_np[:, 0] == target).all() or (B_np[:, 0] == -target).all():
+    #     finish = time.time()
+    #     return B_np.T, finish - timestart
+    
+    prof = get_profile(B_np)
+    dim = basis.shape[0]
+    eta_compute = 0
+    for i,r0 in enumerate(prof):
+        if math.log2(target_estimation * (dim - i)/dim) >= r0:
+            print("dim svp :", dim-i)
+            eta_compute = dim-i
             break
+   
+    # eta = max(eta,eta_compute+1)
+    
+    if eta:
+        print(f"try a SVP-{eta} with G6K on a {basis.shape} matrix")
+        _, B_np, _ = reduce(B_np, use_seysen=True, beta=eta, bkz_tours=1, cores=16, verbose=False, svp_call=True, target = target_estimation)
     if (B_np[:, 0] == target).all() or (B_np[:, 0] == -target).all():
         finish = time.time()
         return B_np.T, finish - timestart
-    if eta:
-        print(f"try a SVP-{eta} with G6K on a {basis.shape} matrix")
-        _, B_np, _ = reduce(B_np, use_seysen=True, beta=eta, bkz_tours=1, cores=16, verbose=False, svp_call=True, target = target_estimation**2)
-    # for blocksize in range(40, beta+1):
-    #     _, B_np, _ = reduce(B_np, use_seysen=True, beta=blocksize, bkz_tours=1)
-    #     if (B_np[:, 0] == target).all() or (B_np[:, 0] == -target).all(): 
-    #         print("we find the target vector")
-    #         break
+  
     finish = time.time()
     return B_np.T, finish - timestart
+
+
+
+def svp(basis, eta,columns_to_keep, A, b, tau, n,k,m, secret_possible_values, search_space_dim, target_estimation):
+    prof = get_profile(basis)
+    subA = A[:m,:]
+    b = b[:m]
+    dim = basis.shape[0]
+    eta_compute = 0
+    for i,r0 in enumerate(prof):
+        if math.log2(target_estimation * (dim - i)/dim) >= r0:
+            print("dim svp :", dim-i)
+            eta_compute = dim-i
+            break
+    eta = max(eta,eta_compute+1)
+
+    removed_cols = [j for j in range(n) if j not in columns_to_keep]
+    col_vecs = {j: subA[:, j] for j in removed_cols}
+    tau_vector = np.array([0]*(n-k+m) + [tau])
+
+    for guess in combinations(removed_cols,  search_space_dim):
+        for value in product(secret_possible_values, repeat=search_space_dim):
+            vecs = np.column_stack([col_vecs[j] for j in guess])
+            
+            diff = b - vecs.dot(value)    
+            padding = np.zeros(n - k, dtype=np.int64)
+            embedding = np.concatenate([diff, padding])
+            B_try = np.vstack((np.hstack((basis,embedding[:,None])),tau_vector[None,:]))
+
+            if eta:
+                print(f"try a SVP-{eta} with G6K on a {basis.shape} matrix")
+                _, B_try, _ = reduce(B_try, use_seysen=True, beta=eta, bkz_tours=1, cores=16, verbose=False, svp_call=True, target = target_estimation)
+            if np.linalg.norm(B_try[:, 0]) <= target_estimation:
+                finish = time.time()
+                return B_try.T, finish - timestart
+
 
 def primal_attack(atk_params):
     """
     create the LWE instance.
     """
     lwe = CreateLWEInstance(atk_params['n'], atk_params['log_q'], atk_params['m'], atk_params['w'], atk_params.get('lwe_sigma'), type_of_secret=atk_params['secret_type'], eta = (atk_params['eta'] if 'eta' in atk_params else None),k_dim = (atk_params['k_dim'] if 'k_dim' in atk_params else None))
-    A, b, s, e = lwe
-    q = 2 ** atk_params['log_q']
+    # A, b, s, e = lwe
+    # q = 2 ** atk_params['log_q']
     #assert ((np.dot(A, s) + e) % q == b).all(), "LWE instance is not valid"
     return lwe
 
@@ -133,7 +167,16 @@ def drop_and_solve(lwe, params, iteration):
     np.random.seed(_seed)
     if 'k_dim' in params:
         _,_,s,_ = lwe
-        columns_to_keep = sorted(np.random.choice(lwe[0].shape[1], params['k_dim']*params['n']-params['k'], replace=False))
+        # columns_to_keep = sorted(np.random.choice(lwe[0].shape[1], params['k_dim']*params['n']-params['k'], replace=False))
+        # good = [i for i in columns_to_keep if s[i] != 0]
+        # if len(good) != w:
+        #     return np.array([0, 0]), np.array([1, 1]) # false in the loop
+        required = params['k_dim'] * params['n'] - params['k']
+        eligible = np.nonzero(s)[0]
+        non_eligible = np.where(s == 0)[0]
+        remain = required - len(eligible)
+        pick_from_non = np.random.choice(non_eligible, size=remain, replace=False)
+        columns_to_keep = np.sort(np.concatenate([eligible, pick_from_non]))
         good = [i for i in columns_to_keep if s[i] != 0]
         if len(good) != w:
             return np.array([0, 0]), np.array([1, 1]) # false in the loop
@@ -148,7 +191,10 @@ def drop_and_solve(lwe, params, iteration):
         estimation = estimate_target_upper_bound_binomial(n*params['k_dim'], w, math.sqrt(eta/2), k, m, eta)
     print(f"Iteration {iteration}: starting solve")
     
-    reduced_basis, _ = reduction(basis, beta,eta_svp, "pbkz", target, estimation)
+    reduced_basis, _ = reduction(basis, beta,eta_svp, target, estimation)
+
+    # A,b,_,_ = lwe
+    # svp(reduced_basis, eta_svp, columns_to_keep, A, b, math.sqrt(eta/2), N,k,m, [-2,-1,1,2], 1, estimation)
     # check if the last column is the target
     # print(f"target: {target}")
     # print(f"reduced basis: {reduced_basis[0]}")
@@ -156,14 +202,15 @@ def drop_and_solve(lwe, params, iteration):
     target = reduced_basis[0]
     
     #here reconstruct the real vector so 
-    # N = params['k_dim']*n
-    # nu = math.sqrt(eta/2) * math.sqrt((N - k) / (w* eta))
+    #N = params['k_dim']*n
+    # nu = math.sqrt(eta/2) * math.sqrt((N - k) / (w * math.sqrt(eta/2)))
+    # print("nu", nu)
     # x, y = approx_nu(nu)
     # # use target but it reduced_basis in fact
-    # s2 = target[:N-k]/x
-    # e2 = target[N-k:-1]/y
-
-
+    # s2 = target[:N-k]
+    # e2 = target[N-k:-1]
+    # print(np.linalg.norm(s2))
+    # print(np.linalg.norm(e2))
     # #hamming weight of s2
     # A,b,__s,_ = lwe
     # hw = (sum([1 for i in range(len(s2)) if s2[i] != 0]))
@@ -206,6 +253,30 @@ def next_power_or_sum(d: int) -> int:
     # et si d est proche du min du sup alors on prend celui ci 
     return min(candidats_sup)
 
+def success_probability(n, k, w):
+    """
+    Probabilité qu'aucune des w colonnes utiles ne se trouve
+    parmi les k colonnes éliminées.
+    """
+    return math.comb(n - w, k) / math.comb(n, k)
+
+def expected_draws(n, k, w):
+    """
+    Espérance du nombre de tirages jusqu'au premier succès.
+    """
+    p = success_probability(n, k, w)
+    return 1 / p
+
+def draws_for_confidence(n, k, w, confidence=0.99):
+    """
+    Nombre minimal de tirages pour être certain au niveau
+    'confidence' de capturer au moins une fois toutes les w colonnes utiles.
+    """
+    p = success_probability(n, k, w)
+    # on résout (1 - (1-p)^t) >= confidence
+    t = math.log(1 - confidence) / math.log(1 - p)
+    return math.ceil(t)
+
 
 def run_single_attack(params, run_id):
     start_time = time.time()
@@ -225,33 +296,61 @@ def run_single_attack(params, run_id):
 
     try:
         params = params.copy()
-        params['m'] = round(7 * params['n'] / 8)
-        if params['secret_type'] == "binomial":
-            N = params['n'] * params['k_dim']
-            params_estimate = LWE.Parameters(
-                n=N,
-                q=2**params['log_q'],
-                Xs=ND.SparseBinomial(params['w'], eta=params['eta'], n=N),
-                Xe=ND.CenteredBinomial(params['eta']),
-            )
+        if params.get('beta') and params.get('eta_svp') and params.get('m') and params.get('k'):
+            if params['secret_type'] == "binomial":
+                N = params['n'] * params['k_dim']
+            else:
+                N = params['n']
+            # params['m'] = N - 1
+            iterations = draws_for_confidence(N,params['k'],params['w'])
+            iterations = 1
+            print("Iterations esperance :", expected_draws(N,params['k'],params['w']))
+            print("Iterations (0.99 level) :", iterations)
+        elif params.get('k'):
+            if params['secret_type'] == "binomial":
+                N = params['n'] * params['k_dim']
+                params_estimate = LWE.Parameters(
+                    n=N-params.get('k'),
+                    q=2**params['log_q'],
+                    Xs=ND.SparseBinomial(params['w'], eta=params['eta'], n=N-params.get('k')),
+                    Xe=ND.CenteredBinomial(params['eta']),
+                )
+            else:
+                N = params['n']
+                params_estimate = LWE.Parameters(
+                    n=N-params.get('k'),
+                    q=2**params['log_q'],
+                    Xs=ND.SparseTernary(n=N-params.get('k'), p=params['w']//2, m=(params['w'] - params['w']//2)),
+                    Xe=ND.DiscreteGaussian(params['lwe_sigma']),
+                )
+            cost = LWE.primal_usvp(params_estimate)
         else:
-            N = params['n']
-            params_estimate = LWE.Parameters(
-                n=N,
-                q=2**params['log_q'],
-                Xs=ND.SparseTernary(n=N, p=params['w']//2, m=(params['w'] - params['w']//2)),
-                Xe=ND.DiscreteGaussian(params['lwe_sigma']),
-            )
-        cost = LWE.primal_hybrid(params_estimate, babai=False, mitm=False)
-        print(cost)
-        k = cost['zeta']
-        m_minimal = cost['d'] - (N - k) - 1
-        params['m'] = m_minimal
-        params['k'] = k
-        params['beta'] = cost['beta']
-        params['eta_svp'] = cost['eta']
-        iterations = cost['repetitions']
-
+            if params['secret_type'] == "binomial":
+                N = params['n'] * params['k_dim']
+                params_estimate = LWE.Parameters(
+                    n=N,
+                    q=2**params['log_q'],
+                    Xs=ND.SparseBinomial(params['w'], eta=params['eta'], n=N),
+                    Xe=ND.CenteredBinomial(params['eta']),
+                )
+            else:
+                N = params['n']
+                params_estimate = LWE.Parameters(
+                    n=N,
+                    q=2**params['log_q'],
+                    Xs=ND.SparseTernary(n=N, p=params['w']//2, m=(params['w'] - params['w']//2)),
+                    Xe=ND.DiscreteGaussian(params['lwe_sigma']),
+                )
+            cost = LWE.primal_hybrid(params_estimate, babai=False, mitm=False)
+            print((cost))
+            k = cost['zeta']
+            m_minimal = min(cost['d'] - (N - k) - 1, 2*N)
+            print("m ", m_minimal)
+            params['m'] = m_minimal
+            params['k'] = k
+            params['beta'] = cost['beta']
+            params['eta_svp'] = cost['eta']
+            iterations = cost['repetitions']
         lwe = primal_attack(params)
         cores = psutil.cpu_count(logical=False)
         result['available_cores'] = cores

@@ -3,7 +3,7 @@ from sage.crypto.lwe import DiscreteGaussianDistributionPolynomialSampler as DRG
 from sage.crypto.lwe import DiscreteGaussianDistributionIntegerSampler as DGauss # type: ignore #noqa
 from typing import Callable, Tuple, List
 from utilities import balance, round_down, approx_nu
-from math import sqrt, ceil
+from math import sqrt, ceil, pi
 import numpy as np
 
 
@@ -130,21 +130,8 @@ def BaiGalCenteredScaledTernary(n: int, q: int, w: int, sigma: float, lwe: Tuple
     target = balance(vector(ZZ, t.denominator() * y * vector(QQ, list(nu *
                      (__s2 - t_vec)) + list(__e[:m]) + [kannan_coeff])), q=t.denominator() * y * q)
     return basis, target
-
-
-from math import comb, sqrt
-
-def nu_scaled(n: int, k: int, w: int, eta: int, sigma: float) -> float:
-    """
-    Calcule nu pour un secret à poids exact w sur n-k positions,
-    non-zeros tirés de CBD_eta conditionnée à etre 0,
-    et erreur d'ecart-type sigma.
-    """
-    # 1) probabilité d'obtenir f=0 dans la CBD
-    P0 = comb(2*eta, eta) / (2**(2*eta))
-    # 2) facteur
-    return sigma * sqrt(2 * (n-k) * (1 - P0) / (w * eta))
     
+
 
 def estimate_target_upper_bound_binomial(n, w, sigma, k, m, eta):
     """
@@ -153,7 +140,8 @@ def estimate_target_upper_bound_binomial(n, w, sigma, k, m, eta):
     - On utilise ceil(sigma) pour majorer les composantes d'erreur.
     """
     # Calcul de nu
-    nu = sigma * sqrt((n - k) / (w*eta))
+    stddev_secret = 1/(sqrt(1 - sqrt(2/(pi*eta))))
+    nu = sigma * sqrt((n - k) / (w * stddev_secret))
     # Approximation rationnelle nu
     x, y = approx_nu(nu)
     
@@ -192,36 +180,6 @@ def estimate_target_upper_bound_ternary(n, w, sigma, k, m):
     bound_sup = np.linalg.norm(vec_bound)
     return bound_sup
 
-from scipy.stats import binom
-
-from scipy.stats import norm, chi2
-
-
-def estimate_target_upper_bound_concat_full(n, w, sigma, k, m, eta,
-                                            delta=1e-6):
-    """
-    1−delta quantile de ||v||, avec
-    secret de dimension w, p = eta/w
-    erreur ~ N(0, sigma^2 I_m)
-    """
-    nu = sigma * sqrt((n - k) / (w*eta))
-    x, y = approx_nu(nu)
-    p_secret = eta / float(w)
-    b_secret = int(binom.ppf(1 - delta, w, p_secret))
-    q_error = chi2.ppf(1 - delta, m)
-    b_error = int(np.ceil(q_error))
-
-    # 4) vecteur de bornes
-    vec_bound = np.concatenate([
-        np.full(b_secret,      x),         # secret
-        np.full(b_error,       y * sigma), # erreur
-        np.array([y * round(sigma)])            # Kannan
-    ])
-
-    # 5) norme Euclidienne
-    return (np.linalg.norm(vec_bound))
-
-
 def BaiGalCenteredScaledBinomial(n: int, q: int, w: int, sigma: float, lwe: Tuple, eta:int, k: int, m: int, columns_to_keep: List[int]):
     # [ 0, (y * q) I_m, 0 // -x I_{n-k} ,  y A2^t, 0 // 0, y (b - A2 (t One))^t, y]
     A, b, __s, __e = lwe
@@ -236,7 +194,8 @@ def BaiGalCenteredScaledBinomial(n: int, q: int, w: int, sigma: float, lwe: Tupl
 
     # shift vector
     t = ZZ(w)/ZZ(n-k)
-    nu = sigma * sqrt((n - k) / (w * eta))
+    stddev_secret = 1/(sqrt(1 - sqrt(2/(pi*eta))))
+    nu = sigma * sqrt((n - k) / (w * stddev_secret))
 
     # DON'T shift vector <-------------
     t = ZZ(0)
