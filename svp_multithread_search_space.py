@@ -57,13 +57,13 @@ def reduction(basis, beta, eta, target, target_estimation, svp=False):
                 print(f"try a BKZ-{beta} on a {basis.shape} matrix")
                 _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=(tours_final if beta == final_beta else 1), cores=16, verbose=False)
         elif beta <= 70:
-            #use jump 15
+            #use jump 20
             print(f"try a BKZ-{beta} like with G6K on a {basis.shape} matrix")
-            _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=1, cores=16, verbose=False, g6k_use=True, bkz_size=beta+30, jump=16)
+            _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=1, cores=16, verbose=False, g6k_use=True, bkz_size=beta+20, jump=21)
         elif beta <= 80:
-            #use jump 5
+            #use jump 10
             print(f"try a BKZ-{beta} like with G6K on a {basis.shape} matrix")
-            _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=1, cores=16, verbose=False, g6k_use=True, bkz_size=beta+5, jump=6)
+            _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=1, cores=16, verbose=False, g6k_use=True, bkz_size=beta+10, jump=11)
         else:
             print(f"try a BKZ-{beta} like with G6K on a {basis.shape} matrix")
             _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=1, cores=16, verbose=False, g6k_use=True, bkz_size=beta+1, jump=2)
@@ -109,8 +109,36 @@ def reduction(basis, beta, eta, target, target_estimation, svp=False):
 from itertools import combinations, product 
 from tqdm import tqdm
 
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing as mp
+
+def try_value(value, basis, b, col_vecs, guess, n, k, eta, kappa, target_estimation):
+    # Reconstruire diff et B_try exactement comme dans le code original
+    diff = b.copy()
+    vecs = np.column_stack([col_vecs[j] for j in guess])
+    diff[n-k:-1] -= vecs.dot(value)
+    B_try = np.vstack([basis, diff])
+    _, B_try, _ = reduce(
+        B_try.T,
+        use_seysen=True,
+        beta=eta,
+        bkz_tours=1,
+        cores=1,
+        verbose=False,
+        svp_call=True,
+        use_gpu = False,
+        lifting_start=kappa,
+        target=target_estimation
+    )
+    norm0 = np.linalg.norm(B_try[:, 0])
+    if norm0 <= target_estimation:
+        return B_try.T, norm0
+    return None
+
+
 def svp(basis, eta,columns_to_keep, A, b_vec, tau, n,k,m, secret_possible_values, search_space_dim, target_estimation):
     timestart = time.time()
+    mp.set_start_method("spawn")
     b = np.array(b_vec.list(), dtype=basis.dtype)
     prof = get_profile(basis)
     subA = A[:m,:]
@@ -138,15 +166,21 @@ def svp(basis, eta,columns_to_keep, A, b_vec, tau, n,k,m, secret_possible_values
             for guess in tqdm(combinations(removed_cols, d),
                   total=total_guesses,
                   desc=f"Combi ({d})"):
-                for value in product(secret_possible_values, repeat=d):
-                    diff = b.copy()
-                    vecs = np.column_stack([col_vecs[j] for j in guess])
-                    diff[n-k:-1] -= vecs.dot(value)
-                    B_try = np.vstack([basis, diff])
-                    _, B_try, _ = reduce(B_try.T, use_seysen=True, beta=eta, bkz_tours=1, cores=16, verbose=False, svp_call=True, lifting_start=kappa, target = target_estimation)
-                    if np.linalg.norm(B_try[:, 0]) <= target_estimation:
-                        finish = time.time()
-                        return B_try.T, finish - timestart
+                with ProcessPoolExecutor(max_workers=4) as exe:
+                        futures = {
+                            exe.submit(try_value, value, basis, b, col_vecs, guess, n, k,
+                                    eta, kappa, target_estimation): value
+                            for value in product(secret_possible_values, repeat=d)
+                        }
+                        for fut in as_completed(futures):
+                            res = fut.result()
+                            if res is not None:
+                                B_found, norm0 = res
+                                duration = time.time() - timestart
+                                # on annule le reste des tâches en attente
+                                for f in futures:
+                                    f.cancel()
+                                return B_found, duration
     #didn't find anything
     finish = time.time()
     return B_try.T, finish - timestart
@@ -217,7 +251,7 @@ def drop_and_solve(lwe, params, iteration):
         _,_,s,_ = lwe
         columns_to_keep = sorted(np.random.choice(lwe[0].shape[1], params['k_dim']*params['n']-params['k'], replace=False))
         good = [i for i in columns_to_keep if s[i] != 0]
-        if len(good) != w:
+        if len(good) < w - 1:
             return np.array([0, 0]), np.array([1, 1]) # false in the loop
         # required = params['k_dim'] * params['n'] - params['k']
         # eligible = np.nonzero(s)[0]

@@ -129,15 +129,13 @@ def BaiGalCenteredScaledTernary(n: int, q: int, w: int, sigma: float, lwe: Tuple
     # print("target = y (n-k) * [nu (s - t One) || e || round(sigma)]")
     target = balance(vector(ZZ, t.denominator() * y * vector(QQ, list(nu *
                      (__s2 - t_vec)) + list(__e[:m]) + [kannan_coeff])), q=t.denominator() * y * q)
-    return basis, target
+    return basis[:-1],basis[-1], target
     
 
 
 def estimate_target_upper_bound_binomial(n, w, sigma, k, m, eta):
     """
     Calcule une borne supérieure sur la norme du vecteur cible.
-    
-    - On utilise ceil(sigma) pour majorer les composantes d'erreur.
     """
     # Calcul de nu
     stddev_secret = 1/(sqrt(1 - sqrt(2/(pi*eta))))
@@ -172,11 +170,12 @@ def estimate_target_upper_bound_ternary(n, w, sigma, k, m):
     # Construction du vecteur de borne
     vec_bound = np.concatenate([
         np.full(w, x),      # secret
-        np.full(m, y * sigma),      # erreur
+        np.full(m, y * ceil(sigma)),      # erreur
         [y * sigma]                 # coefficient Kannan
     ])
     
-    # Borne supérieure de la norme
+    # Borne supérieure de la norme (but i fact this can be less because it's approx by the sigma error and a exact norm value of x)
+    #so math.ceil(sigma) for be sure
     bound_sup = np.linalg.norm(vec_bound)
     return bound_sup
 
@@ -218,7 +217,7 @@ def BaiGalCenteredScaledBinomial(n: int, q: int, w: int, sigma: float, lwe: Tupl
     # print("target = y (n-k) * [nu (s - t One) || e || round(sigma)]")
     target = balance(vector(ZZ, t.denominator() * y * vector(QQ, list(nu *
                      (__s2 - t_vec)) + list(__e[:m]) + [kannan_coeff])), q=t.denominator() * y * q)
-    return basis, target
+    return basis[:-1],basis[-1], target
 
 
 def hamming_weight(vec):
@@ -249,7 +248,7 @@ def BaiGalModuleLWE(
     print("Secret :", s_eq)
     # print("hamming weight of it:", hamming_weight(s_eq))
     # print("n, q, w, sigma,k, m, eta =",N, q,w,sigma,target_k,M,2)
-    basis, target = BaiGalCenteredScaledBinomial(
+    basis, b_vec, target = BaiGalCenteredScaledBinomial(
         n = N,
         q = q,
         w = w,
@@ -267,7 +266,7 @@ def BaiGalModuleLWE(
     # print("over iterations", iterations_needed(N, target_k, w, 1))
     # _,k,_,beta,_,_,_ = (optimize_k_dynamic_beta(N, w, M,q, sigma, 2))
     # print(k,beta)
-    return basis,target
+    return basis,b_vec,target
 
 # def qary_embedding(n: int, q: int, m: int, k: int = 0, sigma: float = 3.2):
 #     # creates a Bai-Galbraith embedding for m samples from the "uniform" distribution in the Decision-LWE game
