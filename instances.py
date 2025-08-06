@@ -154,6 +154,24 @@ def estimate_target_upper_bound_binomial(n, w, sigma, k, m, eta):
     bound_sup = np.linalg.norm(vec_bound)
     return bound_sup
 
+def estimate_target_upper_bound_binomial_vec(n, w, sigma, k, m, eta):
+    """
+    Calcule une borne supérieure sur la norme du vecteur cible.
+    """
+    # Calcul de nu
+    stddev_secret = 1/(sqrt(1 - sqrt(2/(pi*eta))))
+    nu = sigma * sqrt((n - k) / (w * stddev_secret))
+    # Approximation rationnelle nu
+    x, y = approx_nu(nu)
+    
+    # Construction du vecteur de borne
+    vec_bound = np.concatenate([
+        np.full(w, x * eta),      # secret
+        np.full(m, y * sigma),      # erreur
+        [y * sigma]                 # coefficient Kannan
+    ])
+    
+    return vec_bound
 
 
 def estimate_target_upper_bound_ternary(n, w, sigma, k, m):
@@ -178,6 +196,35 @@ def estimate_target_upper_bound_ternary(n, w, sigma, k, m):
     #so math.ceil(sigma) for be sure
     bound_sup = np.linalg.norm(vec_bound)
     return bound_sup
+
+def estimate_target_upper_bound_ternary_vec(n, w, sigma, k, m):
+    """
+    Calcule une borne supérieure sur la norme du vecteur cible pour LWE ternaire.
+
+    - On répartit uniformément les w composantes 'secret' de valeur x
+      dans un tableau de longueur (n-k), le reste étant des zéros.
+    - Ensuite on concatène m composantes d'erreur à y*ceil(sigma),
+      puis le coefficient de Kannan y*sigma.
+    """
+    # 1) Calcul de nu et approximation rationnelle
+    nu = sigma * sqrt((n - k) / w)
+    x, y = approx_nu(nu)
+
+    # 2) Répartition uniforme des w valeurs 'secret' dans n-k créneaux
+    secret_zone = np.zeros(n - k, dtype=float)
+    # positions uniformes arrondies
+    positions = np.floor(np.linspace(0, (n - k) - 1, w)).astype(int)
+    secret_zone[positions] = x
+
+    # 3) Partie erreur : m composantes à y * ceil(sigma)
+    error_part = np.full(m, y * ceil(sigma), dtype=float)
+
+    # 4) Coefficient de Kannan
+    kannan_coeff = np.array([y * sigma], dtype=float)
+
+    # 5) Construction du vecteur final
+    vec_bound = np.concatenate([secret_zone, error_part, kannan_coeff])
+    return vec_bound
 
 def BaiGalCenteredScaledBinomial(n: int, q: int, w: int, sigma: float, lwe: Tuple, eta:int, k: int, m: int, columns_to_keep: List[int]):
     # [ 0, (y * q) I_m, 0 // -x I_{n-k} ,  y A2^t, 0 // 0, y (b - A2 (t One))^t, y]

@@ -1,7 +1,7 @@
 import math
 
 from lwe import CreateLWEInstance
-from instances import BaiGalCenteredScaledTernary, BaiGalModuleLWE, estimate_target_upper_bound_binomial, estimate_target_upper_bound_ternary
+from instances import BaiGalCenteredScaledTernary, BaiGalModuleLWE, estimate_target_upper_bound_binomial, estimate_target_upper_bound_ternary, estimate_target_upper_bound_ternary_vec
 
 import psutil
 import os
@@ -17,6 +17,8 @@ from utilities import approx_nu
 
 from blaster import reduce
 from blaster import get_profile, slope, rhf
+from fpylll.util import gaussian_heuristic
+
 #from reduction import reduction
 def assign_tours(list_beta, svp_needed):
     n = len(list_beta)
@@ -45,14 +47,14 @@ def reduction(basis, beta, eta, target, target_estimation, svp=False):
     print("target norm", target_norm)
     print("target norm estimation", target_estimation)
     svp_needed = False
-    bkz_prog = 10
-    tours_final = 1
+    bkz_prog = 2
+    tours_final = 8
     #eta is also just a minimum, it can be increased by estimation with gaussian heuristic (see svp_kernel)
     list_beta = list(range(40 + ((beta - 40) % bkz_prog), beta + 1, bkz_prog)) # pruning need good quality basis for be faster so here progressive
     for i, beta in enumerate(list_beta):
         if beta < 40:
             print(f"just do a DeepLLL-{beta}")
-            _, B_np, _ = reduce(B_np, use_seysen=True, bkz_tours=1, cores=16, verbose=False) #g6k_use=True, bkz_size=beta, this only for g6k_use
+            _, B_np, _ = reduce(B_np, use_seysen=True, depth=beta, bkz_tours=1, cores=16, verbose=False) #g6k_use=True, bkz_size=beta, this only for g6k_use
         elif beta < 60:
                 print(f"try a BKZ-{beta} on a {basis.shape} matrix")
                 _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=(tours_final if beta == final_beta else 1), cores=16, verbose=False)
@@ -82,13 +84,30 @@ def reduction(basis, beta, eta, target, target_estimation, svp=False):
                 return B_np.T, finish - timestart
 
         prof = get_profile(B_np)
-        dim = basis.shape[0]
-        kappa = 0
-        for i,r0 in enumerate(prof):
-            if math.log2(target_estimation * (dim - i)/dim) >= r0:
-                print("svp start :", i)
-                kappa = i
+        d = basis.shape[0]
+
+        rr = [(2.0**prof[i])**2 for i in range(d)]
+        for n_expected in range(2, d-2):
+            x = (target_estimation**2) * n_expected/(1.*d)
+            if 4./3. * gaussian_heuristic(rr[d-n_expected:]) > x:
                 break
+        print("expected", n_expected)
+        # if n_expected >= 200:
+        #     print("it will be not find")
+        #     finish = time.time()
+        #     return B_np.T, finish - timestart
+        # eta = max(eta, n_expected)
+        llb = d-eta
+        while gaussian_heuristic([(2.0**prof[i])**2 for i in range(llb, d)]) < (target_estimation**2 * (d - llb)/(1.*d)): # noqa
+            llb -= 1
+            if llb < 0:
+                break
+    
+        lift_slack = 5
+        kappa = max(0, llb-lift_slack)
+        print("kappa",kappa)
+    # print(f"Starting workout on block [ {llb}, {d} ) of length {d - llb} with lifting on whole basis")
+
         #√κσ < gh(L[d−κ:d]),
         #starting lifting from eta_compute ?
         # if (dim-kappa) < eta:
@@ -112,25 +131,47 @@ from tqdm import tqdm
 def svp(basis, eta,columns_to_keep, A, b_vec, tau, n,k,m, secret_possible_values, search_space_dim, target_estimation):
     timestart = time.time()
     b = np.array(b_vec.list(), dtype=basis.dtype)
-    prof = get_profile(basis)
     subA = A[:m,:]
     dim = basis.shape[0] + 1
-    kappa = 0
-    for i,r0 in enumerate(prof):
-        if math.log2(target_estimation * (dim - i)/dim) >= r0:
-            print("svp start :", i)
-            kappa = max(0,i - 10)
-            break
-    # eta = max(eta,eta_compute)
 
     removed_cols = [j for j in range(n) if j not in columns_to_keep]
     col_vecs = {j: subA[:, j] for j in removed_cols}
     for d in range(search_space_dim+1):
         if d == 0:
             B_try = np.vstack([basis, b])
+            _, B_try, _ = reduce(B_try.T, use_seysen=True, depth=4, cores=16, verbose=False)
+            if np.linalg.norm(B_try[:, 0]) <= np.linalg.norm(target_estimation):
+                print("find during the LLL")
+                finish = time.time()
+                return B_try.T, finish - timestart
+            prof = get_profile(B_try)
+            rr = [(2.0**prof[i])**2 for i in range(dim)] # norme 2 squared for be the same as get_r fpylll
+            for n_expected in range(eta, dim-2):
+                x = np.linalg.norm(target_estimation[dim-n_expected:])**2
+                if 4./3. * gaussian_heuristic(rr[dim-n_expected:]) > x:
+                    break
+            print("n_expected", n_expected)
+            eta = max(eta, n_expected)
+            # if n_expected >= 200:
+            #     print("it will be not find")
+            #     finish = time.time()
+            #     return B_try.T, finish - timestart
+            # eta = max(eta, n_expected)
+            llb = dim-eta
+            while gaussian_heuristic([(2.0**prof[i])**2 for i in range(llb, dim)]) < np.linalg.norm(target_estimation[llb:])**2: # noqa
+                llb -= 1
+                if llb < 0:
+                    break
+            
+            lift_slack = 10
+            kappa = max(0, llb-lift_slack)
+            f =  math.floor(11 + (dim-kappa)/15)
+            # in g6k f = d-kappa-eta
+            eta = max(eta,dim-kappa-f)
+            print("kappa",kappa)
             print(f"try a SVP-{eta} with G6K on a {B_try.shape} matrix")
-            _, B_try, _ = reduce(B_try.T, use_seysen=True, beta=eta, bkz_tours=1, cores=16, verbose=False, svp_call=True, lifting_start=kappa, target = target_estimation)
-            if np.linalg.norm(B_try[:, 0]) <= target_estimation:
+            _, B_try, _ = reduce(B_try, use_seysen=True, beta=eta, bkz_tours=1, cores=16, verbose=False, svp_call=True, lifting_start=kappa, target = np.linalg.norm(target_estimation[kappa:]))
+            if np.linalg.norm(B_try[:, 0]) <= np.linalg.norm(target_estimation):
                 finish = time.time()
                 return B_try.T, finish - timestart
         else:
@@ -144,7 +185,7 @@ def svp(basis, eta,columns_to_keep, A, b_vec, tau, n,k,m, secret_possible_values
                     diff[n-k:-1] -= vecs.dot(value)
                     B_try = np.vstack([basis, diff])
                     _, B_try, _ = reduce(B_try.T, use_seysen=True, beta=eta, bkz_tours=1, cores=16, verbose=False, svp_call=True, lifting_start=kappa, target = target_estimation)
-                    if np.linalg.norm(B_try[:, 0]) <= target_estimation:
+                    if np.linalg.norm(B_try[:, 0]) <=  np.linalg.norm(target_estimation):
                         finish = time.time()
                         return B_try.T, finish - timestart
     #didn't find anything
@@ -184,7 +225,7 @@ def drop_and_solve(lwe, params, iteration):
     #new params
     search_space = params['search_space']
     need_svp = False
-    if search_space != 1:
+    if True:
         need_svp = True
         if params['secret_type'] == "binomial":
             secret_non_zero_coefficients_possible = [
@@ -241,7 +282,7 @@ def drop_and_solve(lwe, params, iteration):
         estimation = estimate_target_upper_bound_binomial(N, w, math.sqrt(eta/2), k, m, eta)
     print(f"Iteration {iteration}: starting solve")
     
-    if dim_needed == 0:
+    if False:
         reduced_basis, _ = reduction(basis.stack(b_vec), beta,eta_svp, target, estimation, svp=True)
     else:
         #delte all 0 last dimension (because no b_vec)
@@ -255,7 +296,11 @@ def drop_and_solve(lwe, params, iteration):
             0,
             axis=1
         )
-        reduced_basis, _ = svp(reduced_basis, eta_svp, columns_to_keep, A, b_vec, math.sqrt(eta/2), N,k,m, secret_non_zero_coefficients_possible, dim_needed, estimation)
+        if params["secret_type"] == "binomial":
+            sigma_error = math.sqrt(eta/2)
+        elif params["secret_type"] == "ternary":
+            sigma_error = sigma
+        reduced_basis, _ = svp(reduced_basis, eta_svp, columns_to_keep, A, b_vec, sigma_error, N,k,m, secret_non_zero_coefficients_possible, dim_needed, estimate_target_upper_bound_ternary_vec(N, w, sigma, k, m))
     # check if the last column is the target
     # print(f"target: {target}")
     # print(f"reduced basis: {reduced_basis[0]}")
@@ -353,7 +398,7 @@ def run_single_attack(params, run_id):
         'time_elapsed': None,
         'error': None
     }
-
+    start_time = time.time()
     try:
         params = params.copy()
         if params.get('beta') and params.get('eta_svp') and params.get('m') and params.get('k'):
@@ -382,7 +427,7 @@ def run_single_attack(params, run_id):
                     n=N,
                     q=2**params['log_q'],
                     Xs=ND.SparseTernary(n=N, p=params['w']//2, m=(params['w'] - params['w']//2)),
-                    Xe=ND.DiscreteGaussian(params['lwe_sigma']),
+                    Xe=ND.DiscreteGaussian(params['lwe_sigma'], n=N),
                 )
             cost = LWE.primal_hybrid(params_estimate, babai=False, mitm=False)
             print(cost)
