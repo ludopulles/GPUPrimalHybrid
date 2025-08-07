@@ -104,9 +104,8 @@ def BaiGalCenteredScaledTernary(n: int, q: int, w: int, sigma: float, lwe: Tuple
     __s2 = vector(ZZ, [__s[col] for col in columns_to_keep])
 
     # shift vector
-    t = ZZ(w)/ZZ(n-k)
+    # t = ZZ(w)/ZZ(n-k)
     # nu = sigma * (n - k) / sqrt(w * (n - k - w))
-    nu = sigma * (n - k) / sqrt(w * (n - k - w))
 
     # DON'T shift vector <-------------
     t = ZZ(0)
@@ -164,11 +163,16 @@ def estimate_target_upper_bound_binomial_vec(n, w, sigma, k, m, eta):
     # Approximation rationnelle nu
     x, y = approx_nu(nu)
     
+
+    secret_zone = np.zeros(n - k, dtype=float)
+    # positions uniformes arrondies
+    positions = np.floor(np.linspace(0, (n - k) - 1, w)).astype(int)
+    secret_zone[positions] = x * eta
     # Construction du vecteur de borne
     vec_bound = np.concatenate([
-        np.full(w, x * eta),      # secret
+        secret_zone,      # secret
         np.full(m, y * sigma),      # erreur
-        [y * sigma]                 # coefficient Kannan
+        [y * round(sigma)]                 # coefficient Kannan
     ])
     
     return vec_bound
