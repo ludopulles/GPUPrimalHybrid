@@ -49,12 +49,10 @@ def _basis_cache_path(beta, target, savedir="saved_basis", literal_target=False)
         # nom court et stable: BLAKE2s des octets de target
         t_bytes = np.asarray(target, dtype=np.int64).tobytes()
         t_str = hashlib.blake2s(t_bytes, digest_size=12).hexdigest()
-    return os.path.join(savedir, f"{beta}_{t_str}.npy")
+    return os.path.join(savedir, f"{beta}_{t_str}")
 
 def _atomic_save_npy(path, arr):
-    tmp = path + ".tmp"
-    np.save(tmp, arr)
-    os.replace(tmp, path)
+    np.save(path, arr)
 
 def reduction(basis, beta, eta, target, target_estimation, svp=False,
               cache_dir="saved_basis", literal_target_name=False):
@@ -119,7 +117,7 @@ def reduction(basis, beta, eta, target, target_estimation, svp=False,
         prof = get_profile(B_np)
         print("Slope:", slope(prof), f" (rhf={rhf(prof):.2f})")
         #save profile
-        prof_path = ckpt_path.replace(".npy", "_profile.npy")
+        prof_path = ckpt_path + "_profile"
         try:
             _atomic_save_npy(prof_path, prof)
             print(f"[cache] saved profile for β={beta} to {prof_path}")
