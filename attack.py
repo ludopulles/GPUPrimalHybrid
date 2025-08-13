@@ -45,8 +45,7 @@ def reduction(basis, beta, eta, target, target_estimation, svp=False):
     #progressive starting by doing a DeepLLL
     print("target",target)
     print("target norm", target_norm)
-    print("target norm estimation", target_estimation)
-    svp_needed = False
+    print("target estimation", np.linalg.norm(target_estimation))
     bkz_prog = 10
     tours_final = 8
     #eta is also just a minimum, it can be increased by estimation with gaussian heuristic (see svp_kernel)
@@ -86,37 +85,29 @@ def reduction(basis, beta, eta, target, target_estimation, svp=False):
         prof = get_profile(B_np)
         d = basis.shape[0]
 
-        rr = [(2.0**prof[i])**2 for i in range(d)]
-        for n_expected in range(2, d-2):
-            x = (target_estimation**2) * n_expected/(1.*d)
+        prof = get_profile(B_try)
+        rr = [(2.0**prof[i])**2 for i in range(d)] # norme 2 squared for be the same as get_r fpylll
+        for n_expected in range(eta, d-2):
+            x = np.linalg.norm(target_estimation[d-n_expected:])**2
             if 4./3. * gaussian_heuristic(rr[d-n_expected:]) > x:
                 break
-        print("expected", n_expected)
-        # if n_expected >= 200:
-        #     print("it will be not find")
-        #     finish = time.time()
-        #     return B_np.T, finish - timestart
-        # eta = max(eta, n_expected)
+        print("n_expected", n_expected)
+        eta = max(eta, n_expected)
+                
         llb = d-eta
-        while gaussian_heuristic([(2.0**prof[i])**2 for i in range(llb, d)]) < (target_estimation**2 * (d - llb)/(1.*d)): # noqa
-            llb -= 1
-            if llb < 0:
-                break
-    
+        while gaussian_heuristic([(2.0**prof[i])**2 for i in range(llb, d)]) < np.linalg.norm(target_estimation[llb:])**2: # noqa
+                    llb -= 1
+                    if llb < 0:
+                        break
+                
         lift_slack = 5
         kappa = max(0, llb-lift_slack)
+        f =  math.floor(11 + (d-kappa)/15)
+        # in g6k f = d-kappa-eta (maybe need to edit)
+        eta = max(eta,d-kappa-f)
         print("kappa",kappa)
-    # print(f"Starting workout on block [ {llb}, {d} ) of length {d - llb} with lifting on whole basis")
-
-        #√κσ < gh(L[d−κ:d]),
-        #starting lifting from eta_compute ?
-        # if (dim-kappa) < eta:
-        #     kappa = dim - eta
-
-        
-        if eta:
-            print(f"try a SVP-{eta} with G6K on a {basis.shape} matrix")
-            _, B_np, _ = reduce(B_np, use_seysen=True, beta=eta, bkz_tours=1, cores=16, verbose=False, svp_call=True, lifting_start = kappa, target = target_estimation)
+        print(f"try a SVP-{eta} with G6K on a {B_try.shape} matrix")
+        _, B_try, _ = reduce(B_try, use_seysen=True, beta=eta, bkz_tours=1, cores=16, verbose=False, svp_call=True, lifting_start=kappa, target = np.linalg.norm(target_estimation[kappa:]))
         if (B_np[:, 0] == target).all() or (B_np[:, 0] == -target).all():
             finish = time.time()
             return B_np.T, finish - timestart
@@ -223,7 +214,7 @@ def drop_and_solve(lwe, params, iteration):
     #new params
     search_space = params['search_space']
     need_svp = False
-    if True:
+    if search_space > 1:
         need_svp = True
         if params['secret_type'] == "binomial":
             secret_non_zero_coefficients_possible = [
@@ -280,7 +271,7 @@ def drop_and_solve(lwe, params, iteration):
         estimation = estimate_target_upper_bound_binomial(N, w, math.sqrt(eta/2), k, m, eta)
     print(f"Iteration {iteration}: starting solve")
     
-    if False:
+    if not need_svp:
         reduced_basis, _ = reduction(basis.stack(b_vec), beta,eta_svp, target, estimation, svp=True)
     else:
         #delte all 0 last dimension (because no b_vec)
