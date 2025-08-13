@@ -314,11 +314,13 @@ def drop_and_solve(lwe, params, iteration):
     if params["secret_type"] == "ternary":
         N = n
         basis, b_vec, target = BaiGalCenteredScaledTernary(n, q, w, sigma, lwe, k, m, columns_to_keep=columns_to_keep)
-        estimation = estimate_target_upper_bound_ternary(N, w, sigma, k, m)
+        sigma_error = sigma
+        estimation_vec = estimate_target_upper_bound_ternary_vec(N, w, sigma, k, m)
     if params["secret_type"] == "binomial":
         N = n*params['k_dim']
         basis, b_vec, target = BaiGalModuleLWE(n, q, w, m, eta, lwe, k, columns_to_keep=columns_to_keep)
-        estimation = estimate_target_upper_bound_binomial(N, w, math.sqrt(eta/2), k, m, eta)
+        sigma_error = math.sqrt(eta/2)
+        estimation_vec = estimate_target_upper_bound_binomial_vec(N, w, sigma_error, k, m, eta)
     print(f"Iteration {iteration}: starting solve")
     
     if not need_svp:
@@ -335,12 +337,6 @@ def drop_and_solve(lwe, params, iteration):
             0,
             axis=1
         )
-        if params["secret_type"] == "binomial":
-            sigma_error = math.sqrt(eta/2)
-            estimation_vec = estimate_target_upper_bound_binomial_vec(N, w, sigma_error, k, m, eta)
-        elif params["secret_type"] == "ternary":
-            sigma_error = sigma
-            estimation_vec = estimate_target_upper_bound_ternary_vec(N, w, sigma, k, m)
         reduced_basis, _ = svp(reduced_basis, eta_svp, columns_to_keep, A, b_vec, sigma_error, N,k,m, secret_non_zero_coefficients_possible, dim_needed, estimation_vec)
     # check if the last column is the target
     # print(f"target: {target}")
