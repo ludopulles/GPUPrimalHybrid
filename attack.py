@@ -123,6 +123,10 @@ def reduction(basis, beta, eta, target, target_estimation, svp=False,
             print(f"[cache] saved profile for β={beta} to {prof_path}")
         except Exception as e:
             print(f"[cache] failed to save {prof_path}: {e}")
+        # ---------- CHECK IF WE FOUND THE TARGET ----------
+        if (B_np[:, 0] == target).all() or (B_np[:, 0] == -target).all():
+            finish = time.time()
+            return B_np.T, finish - timestart
 
     # ====== SVP option (inchangé, on ne checkpoint pas ici car tu parlais bien de la boucle β) ======
     if svp:
