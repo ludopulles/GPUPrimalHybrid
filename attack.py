@@ -299,7 +299,7 @@ def drop_and_solve(lwe, params, iteration):
         _,_,s,_ = lwe
         columns_to_keep = sorted(np.random.choice(lwe[0].shape[1], params['k_dim']*params['n']-params['k'], replace=False))
         good = [i for i in columns_to_keep if s[i] != 0]
-        if len(good) < w - 1:
+        if len(good) != w:
             return np.array([0, 0]), np.array([1, 1]) # false in the loop
         # required = params['k_dim'] * params['n'] - params['k']
         # eligible = np.nonzero(s)[0]
