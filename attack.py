@@ -35,52 +35,102 @@ def assign_tours(list_beta, svp_needed):
             tours.append(int(t))
     return tours
 
-def reduction(basis, beta, eta, target, target_estimation, svp=False):
+import hashlib
+
+def _basis_cache_path(beta, target, savedir="saved_basis", literal_target=False):
+    """
+    Construit le chemin du checkpoint. Par défaut on hash `target` pour un nom court.
+    Mets `literal_target=True` si tu veux un fichier exactement du type {beta}_{target}.npy.
+    """
+    os.makedirs(savedir, exist_ok=True)
+    if literal_target:
+        t_str = ",".join(map(str, np.asarray(target, dtype=np.int64).tolist()))
+    else:
+        # nom court et stable: BLAKE2s des octets de target
+        t_bytes = np.asarray(target, dtype=np.int64).tobytes()
+        t_str = hashlib.blake2s(t_bytes, digest_size=12).hexdigest()
+    return os.path.join(savedir, f"{beta}_{t_str}.npy")
+
+def _atomic_save_npy(path, arr):
+    tmp = path + ".tmp"
+    np.save(tmp, arr)
+    os.replace(tmp, path)
+
+def reduction(basis, beta, eta, target, target_estimation, svp=False,
+              cache_dir="saved_basis", literal_target_name=False):
     timestart = time.time()
     basis = np.array(basis, dtype=np.int64)
     B_np = basis.T
     final_beta = beta
-    print(f"try a progressive BKZ-{beta} on a {basis.shape} matrix") # i really think it's better to have a 2**n + 2**n+1 so k = 7n/8 - n/2 
+    print(f"try a progressive BKZ-{beta} on a {basis.shape} matrix")
     target_norm = np.linalg.norm(target)
-    #progressive starting by doing a DeepLLL
-    print("target",target)
+    print("target", target)
     print("target norm", target_norm)
     print("target estimation", np.linalg.norm(target_estimation))
+
     bkz_prog = 10
     tours_final = 8
-    #eta is also just a minimum, it can be increased by estimation with gaussian heuristic (see svp_kernel)
-    list_beta = list(range(40 + ((beta - 40) % bkz_prog), beta + 1, bkz_prog)) # pruning need good quality basis for be faster so here progressive
+    # progressive schedule
+    list_beta = list(range(40 + ((beta - 40) % bkz_prog), beta + 1, bkz_prog))
+
     for i, beta in enumerate(list_beta):
+        # ---------- CHECKPOINT: charge si dispo ----------
+        ckpt_path = _basis_cache_path(beta, target, cache_dir, literal_target_name)
+        if os.path.exists(ckpt_path):
+            try:
+                B_np = np.load(ckpt_path, allow_pickle=False)
+                print(f"[cache] loaded basis for β={beta} from {ckpt_path}")
+                continue  # on saute le calcul pour ce β
+            except Exception as e:
+                print(f"[cache] failed to load {ckpt_path}: {e} — recompute…")
+
+        # ---------- CALCUL ----------
         if beta < 40:
             print(f"just do a DeepLLL-{beta}")
-            _, B_np, _ = reduce(B_np, use_seysen=True, depth=beta, bkz_tours=1, cores=16, verbose=False) #g6k_use=True, bkz_size=beta, this only for g6k_use
+            _, B_np, _ = reduce(B_np, use_seysen=True, depth=beta, bkz_tours=1, cores=16, verbose=False)
         elif beta < 60:
             print(f"try a BKZ-{beta} on a {basis.shape} matrix")
-            _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=(tours_final if beta == final_beta else 1), cores=16, verbose=False)
+            _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta,
+                                bkz_tours=(tours_final if beta == final_beta else 1),
+                                cores=16, verbose=False)
         elif beta <= 70:
-            #use jump 20 (now with the d4f)
             print(f"try a BKZ-{beta} like with G6K on a {basis.shape} matrix")
-            _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=(tours_final if beta == final_beta else 1), cores=16, verbose=False, g6k_use=True, bkz_size=beta+40, jump=21)
+            _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta,
+                                bkz_tours=(tours_final if beta == final_beta else 1),
+                                cores=16, verbose=False, g6k_use=True, bkz_size=beta+40, jump=21)
         elif beta <= 80:
-            #use jump 10
             print(f"try a BKZ-{beta} like with G6K on a {basis.shape} matrix")
-            _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=(tours_final if beta == final_beta else 1), cores=16, verbose=False, g6k_use=True, bkz_size=beta+20, jump=11)
+            _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta,
+                                bkz_tours=(tours_final if beta == final_beta else 1),
+                                cores=16, verbose=False, g6k_use=True, bkz_size=beta+20, jump=11)
         else:
             print(f"try a BKZ-{beta} like with G6K on a {basis.shape} matrix")
-            _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta, bkz_tours=(tours_final if beta == final_beta else 1), cores=16, verbose=False, g6k_use=True, bkz_size=beta+2, jump=2)
-        # print('\nProfile = [' + ' '.join([f'{x:.2f}' for x in prof]) + ']\n'
-        #       f'RHF = {rhf(prof):.5f}^n, slope = {slope(prof):.6f}, '
-        #       f'∥b_1∥ = {2.0**prof[0]:.1f}')
+            _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta,
+                                bkz_tours=(tours_final if beta == final_beta else 1),
+                                cores=16, verbose=False, g6k_use=True, bkz_size=beta+2, jump=2)
 
-        #target norm projected intersection
-        #where target norm * (blockszize)/ dim < r0 
-    # if (B_np[:, 0] == target).all() or (B_np[:, 0] == -target).all():
-    #     finish = time.time()
-    #     return B_np.T, finish - timestart
+        # ---------- CHECKPOINT: sauve après ce β ----------
+        try:
+            _atomic_save_npy(ckpt_path, B_np)
+            print(f"[cache] saved basis for β={beta} to {ckpt_path}")
+        except Exception as e:
+            print(f"[cache] failed to save {ckpt_path}: {e}")
+        # SAVE PROFILE
+        prof = get_profile(B_np)
+        print("Slope:", slope(prof), f" (rhf={rhf(prof):.2f})")
+        #save profile
+        prof_path = ckpt_path.replace(".npy", "_profile.npy")
+        try:
+            _atomic_save_npy(prof_path, prof)
+            print(f"[cache] saved profile for β={beta} to {prof_path}")
+        except Exception as e:
+            print(f"[cache] failed to save {prof_path}: {e}")
+
+    # ====== SVP option (inchangé, on ne checkpoint pas ici car tu parlais bien de la boucle β) ======
     if svp:
         if (B_np[:, 0] == target).all() or (B_np[:, 0] == -target).all():
-                finish = time.time()
-                return B_np.T, finish - timestart
+            finish = time.time()
+            return B_np.T, finish - timestart
 
         prof = get_profile(B_np)
         d = basis.shape[0]
@@ -272,11 +322,11 @@ def drop_and_solve(lwe, params, iteration):
     print(f"Iteration {iteration}: starting solve")
     
     if not need_svp:
-        reduced_basis, _ = reduction(basis.stack(b_vec), beta,eta_svp, target, estimation, svp=True)
+        reduced_basis, _ = reduction(basis.stack(b_vec), beta,eta_svp, target, estimation_vec, svp=True)
     else:
         #delte all 0 last dimension (because no b_vec)
         basis = basis.delete_columns([ basis.ncols() - 1 ])
-        reduced_basis, _ = reduction(basis, beta,eta_svp, target, estimation)
+        reduced_basis, _ = reduction(basis, beta,eta_svp, target, estimation_vec)
         A,_,_,_ = lwe
         #reappend to call the svp
         reduced_basis = np.insert(
