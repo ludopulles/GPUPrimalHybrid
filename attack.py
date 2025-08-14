@@ -124,9 +124,10 @@ def reduction(basis, beta, eta, target, target_estimation, svp=False,
         except Exception as e:
             print(f"[cache] failed to save {prof_path}: {e}")
         # ---------- CHECK IF WE FOUND THE TARGET ----------
-        if (B_np[:, 0] == target).all() or (B_np[:, 0] == -target).all():
-            finish = time.time()
-            return B_np.T, finish - timestart
+        if svp: # because if not the basis is not the same dimension as the target
+            if (B_np[:, 0] == target).all() or (B_np[:, 0] == -target).all():
+                finish = time.time()
+                return B_np.T, finish - timestart
 
     # ====== SVP option (inchangé, on ne checkpoint pas ici car tu parlais bien de la boucle β) ======
     if svp:

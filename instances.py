@@ -177,7 +177,7 @@ def estimate_target_upper_bound_binomial_vec(n, w, sigma, k, m, eta, q):
     # Construction du vecteur de borne
     vec_bound = np.concatenate([
         secret_zone,      # secret
-        np.full(m, y * sigma),      # erreur
+        np.full(m, y * eta),      # erreur (eta instead of sigma to be sure that it print the solution, is not necessarily needed)
         [y * round(sigma)]                 # coefficient Kannan
     ])
     
