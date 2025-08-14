@@ -67,8 +67,7 @@ def reduction(basis, beta, eta, target, target_estimation, svp=False,
     print("target", target)
     print("target norm", target_norm)
     print("target estimation", np.linalg.norm(target_estimation))
-
-    bkz_prog = 10
+    bkz_prog = 2
     tours_final = 8
     # progressive schedule
     list_beta = list(range(40 + ((beta - 40) % bkz_prog), beta + 1, bkz_prog))
@@ -83,7 +82,6 @@ def reduction(basis, beta, eta, target, target_estimation, svp=False,
                 continue  # on saute le calcul pour ce β
             except Exception as e:
                 print(f"[cache] failed to load {ckpt_path}: {e} — recompute…")
-
         # ---------- CALCUL ----------
         if beta < 40:
             print(f"just do a DeepLLL-{beta}")
@@ -314,15 +312,85 @@ def _guess_batches(r, d, batch_size):
 #     finish = time.time()
 #     return cp.asnumpy(B_try_gpu[:, -1]), finish - timestart
 
+# def svp_babai(basis, eta, columns_to_keep, A, b_vec, tau,
+#               n, k, m, secret_possible_values, search_space_dim,
+#               target_estimation, scaling_factor_y):
+
+#     timestart = time.time()
+
+#     # --- données sur GPU ---
+#     basis_gpu = cp.asarray(basis, dtype=cp.float64, order='F')
+#     b_host = np.array(b_vec.list(), dtype=basis.dtype)   # arrive côté host
+#     b_gpu  = cp.asarray(b_host, dtype=cp.float64)
+#     subA_gpu = cp.asarray(A[:m, :], dtype=cp.float64)
+
+#     removed = [j for j in range(n) if j not in columns_to_keep]
+#     C_all   = subA_gpu[:, cp.asarray(removed, dtype=cp.int32)]  # (m, r)
+#     r = C_all.shape[1]
+
+#     has_tau = (b_gpu.shape[0] == basis_gpu.shape[0] + 1)
+#     b_used_gpu = b_gpu[:-1] if has_tau else b_gpu
+
+#     B_try_gpu = cp.empty((basis_gpu.shape[1], basis_gpu.shape[0] + 1), dtype=cp.float64, order='F')
+#     B_try_gpu[:, :-1] = basis_gpu.T
+#     B_try_gpu[:, -1]  = b_used_gpu
+
+#     Q_gpu, R_gpu = cp.linalg.qr(B_try_gpu[:, :-1], mode='reduced')
+
+#     B_try_gpu = babai_last_gpu_batched(B_try_gpu, Q_gpu, R_gpu)
+
+#     norm_wanted2 = float(np.dot(target_estimation, target_estimation))
+
+#     if float(B_try_gpu[:, -1].dot(B_try_gpu[:, -1]).get()) <= norm_wanted2:
+#         finish = time.time()
+#         return cp.asnumpy(B_try_gpu[:, -1]), finish - timestart
+
+#     tail_slice = (slice(-(m + 1), -1) if has_tau else slice(-m, None))
+
+#     GUESS_BATCH = 64
+#     VALUE_BATCH = 512
+
+#     for d in range(2, search_space_dim + 1):
+#         total_guesses = math.comb(r, d)
+#         # on barre en "blocs de guesses"
+#         print(f"guessing {total_guesses} number of positions of the last {d} non-zero coefficients of the secret")
+#         num_guess_batches = (total_guesses + GUESS_BATCH - 1) // GUESS_BATCH
+#         for idxs_batch in tqdm(_guess_batches(r, d, GUESS_BATCH),
+#                             total=num_guess_batches, desc=f"Guess-batch (d={d})"):
+#             vecs_stack = C_all[:, idxs_batch]
+#             vecs_stack = vecs_stack.transpose(1, 0, 2)
+
+#             for V_gpu in _value_batches(secret_possible_values, d, VALUE_BATCH):
+#                 G = vecs_stack.shape[0]
+#                 B = V_gpu.shape[1]
+#                 M = G * B
+
+#                 corrections = vecs_stack @ V_gpu[None, :, :]
+#                 corrections *= float(scaling_factor_y)
+
+#                 b_last_batch = cp.repeat(b_used_gpu[:, None], M, axis=1)
+#                 tail = b_last_batch[-m:, :]
+#                 corr_flat = corrections.transpose(1, 0, 2).reshape(m, M)
+#                 tail -= corr_flat
+#                 bprime_batch = babai_last_gpu_batched(b_last_batch, Q_gpu, R_gpu)
+#                 norms2 = cp.sum(bprime_batch * bprime_batch, axis=0)
+#                 mask   = norms2 <= norm_wanted2
+#                 if bool(mask.any().get()):
+#                     k = int(cp.where(mask)[0][0].get())
+#                     finish = time.time()
+#                     print(cp.asnumpy(cp.rint(bprime_batch[:, k])).astype(np.int64))
+#                     return cp.asnumpy(cp.rint(bprime_batch[:, k])).astype(np.int64), finish - timestart
+#     finish = time.time()
+#     return cp.asnumpy(B_try_gpu[:, -1]), finish - timestart
+
 def svp_babai(basis, eta, columns_to_keep, A, b_vec, tau,
               n, k, m, secret_possible_values, search_space_dim,
               target_estimation, scaling_factor_y):
 
     timestart = time.time()
 
-    # --- données sur GPU ---
     basis_gpu = cp.asarray(basis, dtype=cp.float64, order='F')
-    b_host = np.array(b_vec.list(), dtype=basis.dtype)   # arrive côté host
+    b_host = np.array(b_vec.list(), dtype=basis.dtype)  
     b_gpu  = cp.asarray(b_host, dtype=cp.float64)
     subA_gpu = cp.asarray(A[:m, :], dtype=cp.float64)
 
@@ -332,58 +400,61 @@ def svp_babai(basis, eta, columns_to_keep, A, b_vec, tau,
 
     has_tau = (b_gpu.shape[0] == basis_gpu.shape[0] + 1)
     b_used_gpu = b_gpu[:-1] if has_tau else b_gpu
-
-    B_try_gpu = cp.empty((basis_gpu.shape[1], basis_gpu.shape[0] + 1), dtype=cp.float64, order='F')
-    B_try_gpu[:, :-1] = basis_gpu.T
-    B_try_gpu[:, -1]  = b_used_gpu
-
-    Q_gpu, R_gpu = cp.linalg.qr(B_try_gpu[:, :-1], mode='reduced')
-
-    B_try_gpu = babai_last_gpu_batched(B_try_gpu, Q_gpu, R_gpu)
-
-    norm_wanted2 = float(np.dot(target_estimation, target_estimation))
-
-    if float(B_try_gpu[:, -1].dot(B_try_gpu[:, -1]).get()) <= norm_wanted2:
+    B_gpu = basis_gpu.T  # (n, n)
+    Q_gpu, R_gpu = cp.linalg.qr(B_gpu, mode='reduced')
+    y0 = Q_gpu.T @ b_used_gpu                       # (n,)
+    tail_slice = slice(-m, None)   # <-- inconditionnel
+    T = cp.asfortranarray(Q_gpu.T[:, tail_slice])  # d×m
+    P = T @ C_all   
+    C0 = cp.linalg.solve(R_gpu, y0)                 # R c = y
+    Z0 = cp.rint(C0)
+    S0 = y0 - R_gpu @ Z0
+    norm0 = cp.sum(S0 * S0)
+    norm_wanted2 = cp.asarray(float(np.dot(target_estimation, target_estimation)))
+    if bool((norm0 <= norm_wanted2).get()):
+        bprime0 = b_used_gpu - B_gpu @ Z0
         finish = time.time()
-        return cp.asnumpy(B_try_gpu[:, -1]), finish - timestart
-
-    tail_slice = (slice(-(m + 1), -1) if has_tau else slice(-m, None))
+        return cp.asnumpy(bprime0), finish - timestart
 
     GUESS_BATCH = 64
     VALUE_BATCH = 512
 
-    for d in range(1, search_space_dim + 1):
+    nR = int(y0.shape[0])
+
+    for d in range(3, search_space_dim + 1):
         total_guesses = math.comb(r, d)
-        # on barre en "blocs de guesses"
         print(f"guessing {total_guesses} number of positions of the last {d} non-zero coefficients of the secret")
         num_guess_batches = (total_guesses + GUESS_BATCH - 1) // GUESS_BATCH
+
         for idxs_batch in tqdm(_guess_batches(r, d, GUESS_BATCH),
-                            total=num_guess_batches, desc=f"Guess-batch (d={d})"):
-            vecs_stack = C_all[:, idxs_batch]
-            vecs_stack = vecs_stack.transpose(1, 0, 2)
+                               total=num_guess_batches, desc=f"Guess-batch (d={d})"):
+
+            idxs_gpu = cp.asarray(idxs_batch, dtype=cp.int32)
+            P_batch  = P[:, idxs_gpu] 
 
             for V_gpu in _value_batches(secret_possible_values, d, VALUE_BATCH):
-                G = vecs_stack.shape[0]
+                G = idxs_gpu.shape[0]
                 B = V_gpu.shape[1]
                 M = G * B
+                P_flat = P_batch.reshape(nR*G, d)
+                E_flat = P_flat @ V_gpu
+                Y = y0[:, None] - scaling_factor_y * E_flat.reshape(nR, M)
+                C = cp.linalg.solve(R_gpu, Y)
+                Z = cp.rint(C)
+                S = Y - R_gpu @ Z 
+                norms2 = cp.sum(S*S, axis=0)
+                idx = cp.where(norms2 <= norm_wanted2)[0]
+                if idx.size > 0:
+                    k = int(idx[0].get())
+                    z_win = Z[:, k]
+                    bprime_win = Q_gpu @ S[:, k]
+                    bprime_win = cp.rint(bprime_win)
+                    print(cp.asnumpy(bprime_win).astype(np.int64))
+                    return cp.asnumpy(bprime_win).astype(np.int64), time.time() - timestart
 
-                corrections = vecs_stack @ V_gpu[None, :, :]
-                corrections *= float(scaling_factor_y)
-
-                b_last_batch = cp.repeat(b_used_gpu[:, None], M, axis=1)
-                tail = b_last_batch[-m:, :]
-                corr_flat = corrections.transpose(1, 0, 2).reshape(m, M)
-                tail -= corr_flat
-
-                bprime_batch = babai_last_gpu_batched(b_last_batch, Q_gpu, R_gpu)
-                norms2 = cp.sum(bprime_batch * bprime_batch, axis=0)
-                mask   = norms2 <= norm_wanted2
-                if bool(mask.any().get()):
-                    k = int(cp.where(mask)[0][0].get())
-                    finish = time.time()
-                    return cp.asnumpy(bprime_batch[:, k]), finish - timestart
+    bprime0 = Q_gpu @ S0
     finish = time.time()
-    return cp.asnumpy(B_try_gpu[:, -1]), finish - timestart
+    return cp.asnumpy(bprime0), finish - timestart
 
 
 def primal_attack(atk_params):
@@ -440,6 +511,7 @@ def drop_and_solve(lwe, params, iteration):
                     break
         else:
             raise(" Incorrect secret type")
+        # print(f"we need to guess {dim_needed} coefficients in the svp guessing part")
     else:
         dim_needed = 0 # just need one call without delete anything
 
@@ -452,7 +524,7 @@ def drop_and_solve(lwe, params, iteration):
         _,_,s,_ = lwe
         columns_to_keep = sorted(np.random.choice(lwe[0].shape[1], params['k_dim']*params['n']-params['k'], replace=False))
         good = [i for i in columns_to_keep if s[i] != 0]
-        if len(good) < w - 2:
+        if len(good) != w - 1:
             return np.array([0, 0]), np.array([1, 1]) # false in the loop
         # required = params['k_dim'] * params['n'] - params['k']
         # eligible = np.nonzero(s)[0]
@@ -485,7 +557,7 @@ def drop_and_solve(lwe, params, iteration):
         basis = basis.delete_columns([ basis.ncols() - 1 ])
         reduced_basis, _ = reduction(basis, beta,eta_svp, target, estimation_vec)
         A,_,_,_ = lwe
-        #reappend to call the svp
+        #reappend to call the svp (not for babai)
         # reduced_basis = np.insert(
         #     reduced_basis,
         #     reduced_basis.shape[1],
@@ -635,7 +707,7 @@ def run_single_attack(params, run_id):
             params['beta'] = cost['beta']
             params['eta_svp'] = cost['eta']
             params['search_space'] = cost['|S|']
-            iterations = 1200
+            iterations = cost['repetitions']*100
         lwe = primal_attack(params)
         cores = psutil.cpu_count(logical=False)
         result['available_cores'] = cores
