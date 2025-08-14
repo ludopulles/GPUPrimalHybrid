@@ -320,7 +320,7 @@ def drop_and_solve(lwe, params, iteration):
         N = n*params['k_dim']
         basis, b_vec, target = BaiGalModuleLWE(n, q, w, m, eta, lwe, k, columns_to_keep=columns_to_keep)
         sigma_error = math.sqrt(eta/2)
-        estimation_vec = estimate_target_upper_bound_binomial_vec(N, w, sigma_error, k, m, eta)
+        estimation_vec = estimate_target_upper_bound_binomial_vec(N, w, sigma_error, k, m, eta, q)
     print(f"Iteration {iteration}: starting solve")
     
     if not need_svp:

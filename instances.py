@@ -132,7 +132,7 @@ def BaiGalCenteredScaledTernary(n: int, q: int, w: int, sigma: float, lwe: Tuple
     
 
 
-def estimate_target_upper_bound_binomial(n, w, sigma, k, m, eta):
+def estimate_target_upper_bound_binomial(n, w, sigma, k, m, eta, q):
     """
     Calcule une borne supérieure sur la norme du vecteur cible.
     """
@@ -140,7 +140,10 @@ def estimate_target_upper_bound_binomial(n, w, sigma, k, m, eta):
     stddev_secret = 1/(sqrt(1 - sqrt(2/(pi*eta))))
     nu = sigma * sqrt((n - k) / (w * stddev_secret))
     # Approximation rationnelle nu
-    x, y = approx_nu(nu)
+    if q >= 2**20: # just round for don't increase the numerical instability by scaling
+        x,y = round(nu), 1
+    else:
+        x, y = approx_nu(nu)
     
     # Construction du vecteur de borne
     vec_bound = np.concatenate([
@@ -153,7 +156,7 @@ def estimate_target_upper_bound_binomial(n, w, sigma, k, m, eta):
     bound_sup = np.linalg.norm(vec_bound)
     return bound_sup
 
-def estimate_target_upper_bound_binomial_vec(n, w, sigma, k, m, eta):
+def estimate_target_upper_bound_binomial_vec(n, w, sigma, k, m, eta, q):
     """
     Calcule une borne supérieure sur la norme du vecteur cible.
     """
@@ -161,7 +164,10 @@ def estimate_target_upper_bound_binomial_vec(n, w, sigma, k, m, eta):
     stddev_secret = 1/(sqrt(1 - sqrt(2/(pi*eta))))
     nu = sigma * sqrt((n - k) / (w * stddev_secret))
     # Approximation rationnelle nu
-    x, y = approx_nu(nu)
+    if q >= 2**20: # just round for don't increase the numerical instability by scaling
+        x,y = round(nu), 1
+    else:
+        x, y = approx_nu(nu)
     
 
     secret_zone = np.zeros(n - k, dtype=float)
@@ -253,7 +259,10 @@ def BaiGalCenteredScaledBinomial(n: int, q: int, w: int, sigma: float, lwe: Tupl
     t_vec = vector(QQ, [t for _ in range(n-k)])
 
     # approximate scaling factor as rational
-    x, y = approx_nu(nu)
+    if q >= 2**20: # just round for don't increase the numerical instability by scaling
+        x,y = round(nu), 1
+    else:
+        x, y = approx_nu(nu)
     nu = ZZ(x)/ZZ(y)
 
     # build basis
