@@ -49,7 +49,7 @@ def _basis_cache_path(beta, target, savedir="saved_basis", literal_target=False)
         # nom court et stable: BLAKE2s des octets de target
         t_bytes = np.asarray(target, dtype=np.int64).tobytes()
         t_str = hashlib.blake2s(t_bytes, digest_size=12).hexdigest()
-    return os.path.join(savedir, f"{beta}_{t_str}")
+    return os.path.join(savedir, f"{beta}_{t_str}.npy")
 
 def _atomic_save_npy(path, arr):
     np.save(path, arr)
@@ -117,7 +117,7 @@ def reduction(basis, beta, eta, target, target_estimation, svp=False,
         prof = get_profile(B_np)
         print("Slope:", slope(prof), f" (rhf={rhf(prof):.2f})")
         #save profile
-        prof_path = ckpt_path + "_profile"
+        prof_path = ckpt_path.replace(".npy","_profile.npy")
         try:
             _atomic_save_npy(prof_path, prof)
             print(f"[cache] saved profile for β={beta} to {prof_path}")
@@ -136,8 +136,6 @@ def reduction(basis, beta, eta, target, target_estimation, svp=False,
 
         prof = get_profile(B_np)
         d = basis.shape[0]
-
-        prof = get_profile(B_try)
         rr = [(2.0**prof[i])**2 for i in range(d)] # norme 2 squared for be the same as get_r fpylll
         for n_expected in range(eta, d-2):
             x = np.linalg.norm(target_estimation[d-n_expected:])**2
@@ -158,8 +156,8 @@ def reduction(basis, beta, eta, target, target_estimation, svp=False,
         # in g6k f = d-kappa-eta (maybe need to edit)
         eta = max(eta,d-kappa-f)
         print("kappa",kappa)
-        print(f"try a SVP-{eta} with G6K on a {B_try.shape} matrix")
-        _, B_try, _ = reduce(B_try, use_seysen=True, beta=eta, bkz_tours=1, cores=16, verbose=False, svp_call=True, lifting_start=kappa, target = np.linalg.norm(target_estimation[kappa:]))
+        print(f"try a SVP-{eta} with G6K on a {B_np.shape} matrix")
+        _, B_np, _ = reduce(B_np, use_seysen=True, beta=eta, bkz_tours=1, cores=16, verbose=False, svp_call=True, lifting_start=kappa, target = np.linalg.norm(target_estimation[kappa:]))
         if (B_np[:, 0] == target).all() or (B_np[:, 0] == -target).all():
             finish = time.time()
             return B_np.T, finish - timestart
