@@ -181,7 +181,7 @@ def estimate_target_upper_bound_binomial_vec(n, w, sigma, k, m, eta, q):
         [y * round(sigma)]                 # coefficient Kannan
     ])
     
-    return vec_bound
+    return vec_bound, y
 
 
 def estimate_target_upper_bound_ternary(n, w, sigma, k, m):
