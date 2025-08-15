@@ -234,7 +234,7 @@ def estimate_target_upper_bound_ternary_vec(n, w, sigma, k, m):
 
     # 5) Construction du vecteur final
     vec_bound = np.concatenate([secret_zone, error_part, kannan_coeff])
-    return vec_bound
+    return vec_bound, y
 
 def BaiGalCenteredScaledBinomial(n: int, q: int, w: int, sigma: float, lwe: Tuple, eta:int, k: int, m: int, columns_to_keep: List[int]):
     # [ 0, (y * q) I_m, 0 // -x I_{n-k} ,  y A2^t, 0 // 0, y (b - A2 (t One))^t, y]

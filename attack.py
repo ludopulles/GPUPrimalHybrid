@@ -67,7 +67,7 @@ def reduction(basis, beta, eta, target, target_estimation, svp=False,
     print("target", target)
     print("target norm", target_norm)
     print("target estimation", np.linalg.norm(target_estimation))
-    bkz_prog = 2
+    bkz_prog = 10
     tours_final = 8
     # progressive schedule
     list_beta = list(range(40 + ((beta - 40) % bkz_prog), beta + 1, bkz_prog))
@@ -79,6 +79,8 @@ def reduction(basis, beta, eta, target, target_estimation, svp=False,
             try:
                 B_np = np.load(ckpt_path, allow_pickle=False)
                 print(f"[cache] loaded basis for β={beta} from {ckpt_path}")
+                prof = get_profile(B_np)
+                print("Slope:", slope(prof), f" (rhf={rhf(prof)})")
                 continue  # on saute le calcul pour ce β
             except Exception as e:
                 print(f"[cache] failed to load {ckpt_path}: {e} — recompute…")
@@ -91,16 +93,11 @@ def reduction(basis, beta, eta, target, target_estimation, svp=False,
             _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta,
                                 bkz_tours=(tours_final if beta == final_beta else 1),
                                 cores=16, verbose=False)
-        elif beta <= 70:
-            print(f"try a BKZ-{beta} like with G6K on a {basis.shape} matrix")
-            _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta,
-                                bkz_tours=(tours_final if beta == final_beta else 1),
-                                cores=16, verbose=False, g6k_use=True, bkz_size=beta+40, jump=21)
         elif beta <= 80:
             print(f"try a BKZ-{beta} like with G6K on a {basis.shape} matrix")
             _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta,
                                 bkz_tours=(tours_final if beta == final_beta else 1),
-                                cores=16, verbose=False, g6k_use=True, bkz_size=beta+20, jump=11)
+                                cores=16, verbose=False, g6k_use=True, bkz_size=beta+20, jump=21)
         else:
             print(f"try a BKZ-{beta} like with G6K on a {basis.shape} matrix")
             _, B_np, _ = reduce(B_np, use_seysen=True, beta=beta,
@@ -115,7 +112,7 @@ def reduction(basis, beta, eta, target, target_estimation, svp=False,
             print(f"[cache] failed to save {ckpt_path}: {e}")
         # SAVE PROFILE
         prof = get_profile(B_np)
-        print("Slope:", slope(prof), f" (rhf={rhf(prof):.2f})")
+        print("Slope:", slope(prof), f" (rhf={rhf(prof)})")
         #save profile
         prof_path = ckpt_path.replace(".npy","_profile.npy")
         try:
@@ -170,7 +167,7 @@ def reduction(basis, beta, eta, target, target_estimation, svp=False,
 from itertools import combinations, product 
 from tqdm import tqdm
 
-def svp(basis, eta,columns_to_keep, A, b_vec, tau, n,k,m, secret_possible_values, search_space_dim, target_estimation):
+def svp(basis, eta,columns_to_keep, A, b_vec, tau, n,k,m, secret_possible_values, search_space_dim, target_estimation, scaling_factor_y):
     timestart = time.time()
     b = np.array(b_vec.list(), dtype=basis.dtype)
     subA = A[:m,:]
@@ -222,7 +219,7 @@ def svp(basis, eta,columns_to_keep, A, b_vec, tau, n,k,m, secret_possible_values
                 for value in product(secret_possible_values, repeat=d):
                     diff = b.copy()
                     vecs = np.column_stack([col_vecs[j] for j in guess])
-                    diff[n-k:-1] -= vecs.dot(value)
+                    diff[n-k:-1] -= vecs.dot(value) * scaling_factor_y
                     B_try = np.vstack([basis, diff])
                     _, B_try, _ = reduce(B_try.T, use_seysen=True, beta=eta, bkz_tours=1, cores=16, verbose=False, svp_call=True, lifting_start=kappa, target = np.linalg.norm(target_estimation[kappa:]))
                     if np.linalg.norm(B_try[:, 0]) <=  np.linalg.norm(target_estimation):
@@ -241,6 +238,14 @@ def _value_batches(values, d, batch_size):
         if not block:
             break
         yield cp.asarray(block, dtype=cp.float64).T
+
+def _value_batches_fp32(values, d, batch_size):
+    it = product(values, repeat=d)
+    while True:
+        block = list(islice(it, batch_size))
+        if not block:
+            break
+        yield cp.asarray(block, dtype=cp.float32).T
 
 def _guess_batches(r, d, batch_size):
     it = combinations(range(r), d)
@@ -388,16 +393,13 @@ def svp_babai(basis, eta, columns_to_keep, A, b_vec, tau,
               target_estimation, scaling_factor_y):
 
     timestart = time.time()
-
     basis_gpu = cp.asarray(basis, dtype=cp.float64, order='F')
     b_host = np.array(b_vec.list(), dtype=basis.dtype)  
     b_gpu  = cp.asarray(b_host, dtype=cp.float64)
     subA_gpu = cp.asarray(A[:m, :], dtype=cp.float64)
-
     removed = [j for j in range(n) if j not in columns_to_keep]
     C_all   = subA_gpu[:, cp.asarray(removed, dtype=cp.int32)]  # (m, r)
     r = C_all.shape[1]
-
     has_tau = (b_gpu.shape[0] == basis_gpu.shape[0] + 1)
     b_used_gpu = b_gpu[:-1] if has_tau else b_gpu
     B_gpu = basis_gpu.T  # (n, n)
@@ -415,13 +417,10 @@ def svp_babai(basis, eta, columns_to_keep, A, b_vec, tau,
         bprime0 = b_used_gpu - B_gpu @ Z0
         finish = time.time()
         return cp.asnumpy(bprime0), finish - timestart
-
     GUESS_BATCH = 64
     VALUE_BATCH = 512
-
     nR = int(y0.shape[0])
-
-    for d in range(3, search_space_dim + 1):
+    for d in range(1, search_space_dim + 1):
         total_guesses = math.comb(r, d)
         print(f"guessing {total_guesses} number of positions of the last {d} non-zero coefficients of the secret")
         num_guess_batches = (total_guesses + GUESS_BATCH - 1) // GUESS_BATCH
@@ -451,11 +450,264 @@ def svp_babai(basis, eta, columns_to_keep, A, b_vec, tau,
                     bprime_win = cp.rint(bprime_win)
                     print(cp.asnumpy(bprime_win).astype(np.int64))
                     return cp.asnumpy(bprime_win).astype(np.int64), time.time() - timestart
-
     bprime0 = Q_gpu @ S0
     finish = time.time()
     return cp.asnumpy(bprime0), finish - timestart
 
+def _recompute_candidate_fp64(basis, b_host, A, removed, m,
+                              scaling_factor_y,
+                              idxs_gpu, V_gpu, k,
+                              has_tau, target_estimation):
+    """
+    Recalcule en FP64 *depuis la base* (QR, P, solve, arrondi) pour le candidat k.
+    """
+    # Map index k -> (g, b) dans la matrice Y de taille M = G*B
+    G = int(idxs_gpu.shape[0])
+    Bcnt = int(V_gpu.shape[1])
+    g = k // Bcnt
+    b = k %  Bcnt
+
+    # ----- tout en float64 -----
+    B64   = cp.asarray(basis, dtype=cp.float64, order='F').T      # (n,n)
+    b64   = cp.asarray(b_host, dtype=cp.float64)
+    b_used64 = b64[:-1] if has_tau else b64
+    A64   = cp.asarray(A[:m, :], dtype=cp.float64, order='F')[:, cp.asarray(removed, dtype=cp.int32)]
+
+    Q64, R64 = cp.linalg.qr(B64, mode='reduced')
+    y064 = Q64.T @ b_used64
+
+    T64 = cp.asfortranarray(Q64.T[:, -m:])
+    P64 = T64 @ A64                                 # (n, r)
+
+    # Construire E pour (g, b)
+    idxs_g = idxs_gpu[g]
+    Vb64   = cp.asarray(V_gpu[:, b], dtype=cp.float64)
+    E64    = P64[:, idxs_g] @ Vb64
+    Y64 = y064 - (scaling_factor_y * E64)
+    C64 = cp.linalg.solve(R64, Y64)
+    Z64 = cp.rint(C64)
+    S64 = Y64 - R64 @ Z64
+
+    # Vérif seuil en FP64
+    thr64 = float(np.dot(target_estimation, target_estimation))
+    if float(cp.sum(S64*S64)) <= thr64:
+        bprime64 = Q64 @ S64
+        bprime64 = cp.rint(bprime64).astype(cp.int64)
+        return cp.asnumpy(bprime64), True
+    return None, False
+
+def svp_babai_fp32(basis, eta, columns_to_keep, A, b_vec, tau,
+              n, k, m, secret_possible_values, search_space_dim,
+              target_estimation, scaling_factor_y):
+    prune_tail = 16
+    timestart = time.time()
+    basis_gpu = cp.asarray(basis, dtype=cp.float32, order='F')
+    b_host = np.array(b_vec.list(), dtype=basis.dtype)  
+    b_gpu  = cp.asarray(b_host, dtype=cp.float32)
+    subA_gpu = cp.asarray(A[:m, :], dtype=cp.float32)
+    removed = [j for j in range(n) if j not in columns_to_keep]
+    C_all   = subA_gpu[:, cp.asarray(removed, dtype=cp.int32)]  # (m, r)
+    r = C_all.shape[1]
+    has_tau = (b_gpu.shape[0] == basis_gpu.shape[0] + 1)
+    b_used_gpu = b_gpu[:-1] if has_tau else b_gpu
+    B_gpu = basis_gpu.T  # (n, n)
+
+    #try to avoid error from QR 
+    #Q_gpu, R_gpu = cp.linalg.qr(B_gpu, mode='reduced')
+    Q_gpu, R_gpu = cp.linalg.qr(cp.asarray(basis, dtype=cp.float64, order='F').T, mode='reduced')
+    Q_gpu, R_gpu = Q_gpu.astype(cp.float32), R_gpu.astype(cp.float32)
+
+    y0 = Q_gpu.T @ b_used_gpu                       # (n,)
+    tail_slice = slice(-m, None)   # <-- inconditionnel
+    T = cp.asfortranarray(Q_gpu.T[:, tail_slice])  # d×m
+    P = T @ C_all   
+    C0 = cp.linalg.solve(R_gpu, y0)                 # R c = y
+    Z0 = cp.rint(C0)
+    S0 = y0 - R_gpu @ Z0
+    norm0 = cp.sum(S0 * S0)
+    norm_wanted2 = cp.asarray(float(np.dot(target_estimation, target_estimation)))
+    norm_wanted2_pruning = cp.asarray(float(np.dot(target_estimation[-prune_tail:], target_estimation[-prune_tail:])))
+    if bool((norm0 <= norm_wanted2).get()):
+        bprime0 = b_used_gpu - B_gpu @ Z0
+        finish = time.time()
+        return cp.asnumpy(bprime0), finish - timestart
+    GUESS_BATCH = 256
+    VALUE_BATCH = 512
+    nR = int(y0.shape[0])
+    for d in range(1, search_space_dim + 1):
+        total_guesses = math.comb(r, d)
+        print(f"guessing {total_guesses} number of positions of the last {d} non-zero coefficients of the secret")
+        num_guess_batches = (total_guesses + GUESS_BATCH - 1) // GUESS_BATCH
+
+        for idxs_batch in tqdm(_guess_batches(r, d, GUESS_BATCH),
+                               total=num_guess_batches, desc=f"Guess-batch (d={d})"):
+
+            idxs_gpu = cp.asarray(idxs_batch, dtype=cp.int32)
+            P_batch  = P[:, idxs_gpu] 
+
+            for V_gpu in _value_batches_fp32(secret_possible_values, d, VALUE_BATCH):
+                G = idxs_gpu.shape[0]
+                B = V_gpu.shape[1]
+                M = G * B
+                P_flat = P_batch.reshape(nR*G, d)
+                E_flat = P_flat @ V_gpu
+                Y = y0[:, None] - scaling_factor_y * E_flat.reshape(nR, M)
+                C = cp.linalg.solve(R_gpu, Y)
+                Z = cp.rint(C)
+                S = Y - R_gpu @ Z 
+                norms2 = cp.sum(S*S, axis=0)
+                idx = cp.where(norms2 <= norm_wanted2)[0]
+                if idx.size > 0:
+                    k = int(idx[0].get())
+                    #recompute all in float64 here for recover well
+                    bprime64, ok = _recompute_candidate_fp64(
+                        basis, b_host, A, removed, m,
+                        scaling_factor_y,
+                        idxs_gpu, V_gpu, k,
+                        has_tau, target_estimation
+                    )
+                    print(bprime64)
+                    if ok:
+                        return bprime64, time.time() - timestart
+    bprime0 = Q_gpu @ S0
+    finish = time.time()
+    return cp.asnumpy(bprime0), finish - timestart
+
+# def babai_ready(reduced_basis, sigma, scaling_y, assume_columns=True):
+#     """
+#     Retourne (ok, worst_i, worst_margin, r2, margins)
+#       ok            : True si min(margins) > 0 (Babai très probable)
+#       worst_i       : index i avec la pire marge
+#       worst_margin  : valeur de la pire marge
+#       r2            : diag(R)^2 = ||b_i^*||^2
+#       margins       : tableau complet des marges
+#     Paramètres:
+#       - assume_columns: True si les vecteurs de base sont en colonnes (B = [b1 ... bn]).
+#                         Si tu stockes tes vecteurs en LIGNES, passe à False (ou fais QR sur B.T).
+#       - use_gpu_qr    : si True et que B est un cupy.ndarray, fait le QR sur GPU.
+#     """
+#     sigma2 = (scaling_y * float(sigma)) ** 2
+
+#     M = reduced_basis if assume_columns else reduced_basis.T
+#     R = np.linalg.qr(M, mode='r')
+#     r2 = np.square(np.diag(R))
+
+#     n = r2.shape[0]
+#     suffix_dims = np.arange(n, 0, -1, dtype=float)
+
+#     margins = 0.25 * r2 - sigma2 * suffix_dims
+#     worst_i = int(np.argmin(margins))
+#     worst_margin = float(margins[worst_i])
+#     ok = bool(np.all(margins > 0.0))
+#     return ok, worst_i, worst_margin, r2, margins
+
+def _chi2_quantile_upper_bound(df, p=0.99):
+    # Laurent–Massart: P(Chi² >= df + 2√(df t) + 2t) ≤ e^{-t}, t=ln(1/(1-p))
+    df  = max(1e-9, float(df))
+    t   = np.log(1.0 / max(1.0 - float(p), 1e-16))
+    return df + 2.0*np.sqrt(df*t) + 2.0*t
+
+def babai_ready(reduced_basis,
+                sigma=None, scaling_y=1.0,
+                target_estimation=None,
+                assume_columns=True,
+                # paramètres fallback (si target_estimation est None) :
+                m=None, u_rest=0, kappa=1.0,
+                safety=1.0, use_chi2=False, chi2_p=0.99):
+    """
+    Retourne (ok, worst_i, worst_margin, r2, margins)
+
+    Deux modes:
+      - Avec `target_estimation` : borne globale ρ² = ||target_estimation||² (même que dans svp_babai).
+      - Sinon : modèle gaussien par suffixe avec (mesure + secret restant), option χ².
+
+    Paramètres fallback:
+      m       : nb de lignes 'mesure' (si None -> m = n)
+      u_rest  : nb attendu de coeffs de secret non devinés
+      kappa   : levier moyen des colonnes (≈1.0 conservateur)
+      safety  : marge multiplicative (>1 => plus conservateur)
+      use_chi2, chi2_p : si True, remplace la dimension effective ν par q_χ²(ν,p)
+    """
+    M = reduced_basis if assume_columns else reduced_basis.T
+    # QR (CPU numpy; suffisant pour un check). Si tu veux GPU, remplace par cupy linalg.qr.
+    R = np.linalg.qr(np.asarray(M), mode='r')
+    r2 = np.square(np.diag(R))         # ||b_i^*||^2
+    n  = r2.shape[0]
+
+    if target_estimation is not None:
+        # --- MODE A : borne vecteur explicite (cohérent avec ton test runtime)
+        rho2 = float(np.dot(np.asarray(target_estimation, float),
+                            np.asarray(target_estimation, float)))
+        rho2 *= float(safety)**2        # optionnel: coussin
+        margins = 0.25 * r2 - rho2      # même borne pour tous les étages
+    else:
+        # --- MODE B : modèle bruit gaussien par suffixe (mesure + secret restant)
+        assert sigma is not None, "sigma must be provided when target_estimation is None"
+        sigma2 = (abs(float(scaling_y)) * float(sigma) * float(safety))**2
+        if m is None:
+            m = n
+        m = float(min(max(int(m), 0), n))
+
+        i = np.arange(n, dtype=float)
+        n_suffix = (n - i)                        # d, d-1, ..., 1
+        Le = (m / n) * n_suffix                   # partie 'mesure'
+        Ls = (float(kappa) * float(u_rest) / n) * n_suffix  # secret restant
+        nu = np.maximum(1.0, Le + Ls)             # "ddl" effectifs (≥1)
+
+        if use_chi2:
+            Q = np.array([_chi2_quantile_upper_bound(df, p=chi2_p) for df in nu], dtype=float)
+        else:
+            Q = nu
+
+        rho2_vec = sigma2 * Q
+        margins  = 0.25 * r2 - rho2_vec
+
+    worst_i = int(np.argmin(margins))
+    worst_margin = float(margins[worst_i])
+    ok = bool(np.all(margins > 0.0))
+    return ok, worst_i, worst_margin, r2, margins
+
+def plot_superposed_from_file_and_basis(beta, n, reduced_basis, prof_from_get_profile=None, scaling_factor_y=1,
+                                        prof_form="log2_norm",
+                                        dirpath="saved_profiles", fname_tpl="prof_b{beta}_n{n}.npy",
+                                        title_extra=None):
+    """
+    Charge reduced_profile/prof_{beta}_{n}.npy (supposé en log2),
+    convertit le 'prof' mesuré au même format log2, et trace la superposition.
+    """
+    # 1) fichier sauvegardé (log2)
+    path = os.path.join(dirpath, fname_tpl.format(beta=beta, n=n))
+    r_file_log2 = (np.load(path))/2
+    d_file = len(r_file_log2)
+
+    # 2) profil mesuré (converti en log2)
+    
+    r_meas_log2 = (prof_from_get_profile - np.log2(scaling_factor_y)) # maybe to be squared
+    d_meas = len(r_meas_log2)
+
+    d = min(d_file, d_meas)
+    if d_file != d_meas:
+        print(f"[warn] tailles différentes: file={d_file}, mesuré={d_meas}. Tronque à {d}.")
+
+    # 3) plot
+    i = np.arange(1, d + 1)
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.plot(i, r_file_log2[:d], lw=1.8, label=f"saved: prof_{beta}_{n}.npy (log2)")
+    ax.plot(i, r_meas_log2[:d], lw=1.6, label="measured reduced_basis (log2)")
+    ax.set_xlabel("index i")
+    ax.set_ylabel("log2")
+    ttl = f"Basis profile superposition — β={beta}, n={n}"
+    if title_extra:
+        ttl += f" — {title_extra}"
+    ax.set_title(ttl)
+    ax.grid(True, which="both", linestyle=":", alpha=0.6)
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+    # petit diagnostic
+    diff = r_meas_log2[:d] - r_file_log2[:d]
+    print(f"Δ mean={diff.mean():.3f}, std={diff.std(ddof=1):.3f}, max|Δ|={np.abs(diff).max():.3f}")
 
 def primal_attack(atk_params):
     """
@@ -524,7 +776,7 @@ def drop_and_solve(lwe, params, iteration):
         _,_,s,_ = lwe
         columns_to_keep = sorted(np.random.choice(lwe[0].shape[1], params['k_dim']*params['n']-params['k'], replace=False))
         good = [i for i in columns_to_keep if s[i] != 0]
-        if len(good) != w - 1:
+        if len(good) < w - 3:
             return np.array([0, 0]), np.array([1, 1]) # false in the loop
         # required = params['k_dim'] * params['n'] - params['k']
         # eligible = np.nonzero(s)[0]
@@ -542,7 +794,7 @@ def drop_and_solve(lwe, params, iteration):
         N = n
         basis, b_vec, target = BaiGalCenteredScaledTernary(n, q, w, sigma, lwe, k, m, columns_to_keep=columns_to_keep)
         sigma_error = sigma
-        estimation_vec = estimate_target_upper_bound_ternary_vec(N, w, sigma, k, m)
+        estimation_vec, scaling_factor_y = estimate_target_upper_bound_ternary_vec(N, w, sigma, k, m)
     if params["secret_type"] == "binomial":
         N = n*params['k_dim']
         basis, b_vec, target = BaiGalModuleLWE(n, q, w, m, eta, lwe, k, columns_to_keep=columns_to_keep)
@@ -550,26 +802,46 @@ def drop_and_solve(lwe, params, iteration):
         estimation_vec, scaling_factor_y = estimate_target_upper_bound_binomial_vec(N, w, sigma_error, k, m, eta, q)
     print(f"Iteration {iteration}: starting solve")
     
+    babai = False
+
     if not need_svp:
         reduced_basis, _ = reduction(basis.stack(b_vec), beta,eta_svp, target, estimation_vec, svp=True)
     else:
+        if eta_svp == 2:
+            babai = True
         #delte all 0 last dimension (because no b_vec)
         basis = basis.delete_columns([ basis.ncols() - 1 ])
         reduced_basis, _ = reduction(basis, beta,eta_svp, target, estimation_vec)
+        prof = get_profile(reduced_basis)
+        print("scaling factor on this basis :", scaling_factor_y)
+        plot_superposed_from_file_and_basis(beta, N, reduced_basis, prof_from_get_profile=prof, scaling_factor_y=scaling_factor_y)
         A,_,_,_ = lwe
+        if babai:
+            ok, worst_i, worst_margin, r2, margins = babai_ready(reduced_basis, sigma_error, scaling_factor_y, m=m)
+            if ok:
+                # Toutes les marges > 0 → Babai très probable
+                if q <= 2**20: # more than 10x faster in fp32
+                    reduced_basis, _ = svp_babai_fp32(reduced_basis, eta_svp, columns_to_keep, A, b_vec, sigma_error, N,k,m, secret_non_zero_coefficients_possible, dim_needed, estimation_vec, scaling_factor_y)
+                else:
+                    reduced_basis, _ = svp_babai(reduced_basis, eta_svp, columns_to_keep, A, b_vec, sigma_error, N,k,m, secret_non_zero_coefficients_possible, dim_needed, estimation_vec, scaling_factor_y)
+            else:
+                 print(f"[Babai-check] Not ready: min margin = {worst_margin:.3e} at i={worst_i}. "
+                             f"Skip Babai (need higher BKZ).")
+                            
+        else:
         #reappend to call the svp (not for babai)
-        # reduced_basis = np.insert(
-        #     reduced_basis,
-        #     reduced_basis.shape[1],
-        #     0,
-        #     axis=1
-        # )
-        reduced_basis, _ = svp_babai(reduced_basis, eta_svp, columns_to_keep, A, b_vec, sigma_error, N,k,m, secret_non_zero_coefficients_possible, dim_needed, estimation_vec, scaling_factor_y)
+            reduced_basis = np.insert(
+                reduced_basis,
+                reduced_basis.shape[1],
+                0,
+                axis=1
+            )
+            reduced_basis, _ = svp(reduced_basis, eta_svp, columns_to_keep, A, b_vec, sigma_error, N,k,m, secret_non_zero_coefficients_possible, dim_needed, estimation_vec, scaling_factor_y)
+            
     # check if the last column is the target
     # print(f"target: {target}")
     # print(f"reduced basis: {reduced_basis[0]}")
     target_precompute = target
-    babai = True
     if babai:
         target = np.concatenate((reduced_basis, [scaling_factor_y*round(sigma_error)]))
     else:
@@ -697,7 +969,7 @@ def run_single_attack(params, run_id):
                     Xs=ND.SparseTernary(n=N, p=params['w']//2, m=(params['w'] - params['w']//2)),
                     Xe=ND.DiscreteGaussian(params['lwe_sigma'], n=N),
                 )
-            cost = LWE.primal_hybrid(params_estimate, babai=False, mitm=False)
+            cost = LWE.primal_hybrid(params_estimate, babai=True, mitm=False)
             print(cost)
             k = cost['zeta']
             m_minimal = min(cost['d'] - (N - k), 2*N)
