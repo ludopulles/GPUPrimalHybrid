@@ -113,7 +113,10 @@ def BaiGalCenteredScaledTernary(n: int, q: int, w: int, sigma: float, lwe: Tuple
     t_vec = vector(QQ, [t for _ in range(n-k)])
 
     # approximate scaling factor as rational
-    x, y = approx_nu(nu)
+    if q >= 2: # just round for don't increase the numerical instability by scaling
+        x,y = round(nu), 1
+    else:
+        x, y = approx_nu(nu)
     nu = ZZ(x)/ZZ(y)
 
     # build basis
@@ -140,7 +143,7 @@ def estimate_target_upper_bound_binomial(n, w, sigma, k, m, eta, q):
     stddev_secret = 1/(sqrt(1 - sqrt(2/(pi*eta))))
     nu = sigma * sqrt((n - k) / (w * stddev_secret))
     # Approximation rationnelle nu
-    if q >= 2**20: # just round for don't increase the numerical instability by scaling
+    if q >= 2: # just round for don't increase the numerical instability by scaling
         x,y = round(nu), 1
     else:
         x, y = approx_nu(nu)
@@ -164,7 +167,7 @@ def estimate_target_upper_bound_binomial_vec(n, w, sigma, k, m, eta, q):
     stddev_secret = 1/(sqrt(1 - sqrt(2/(pi*eta))))
     nu = sigma * sqrt((n - k) / (w * stddev_secret))
     # Approximation rationnelle nu
-    if q >= 2**20: # just round for don't increase the numerical instability by scaling
+    if q >= 2: # just round for don't increase the numerical instability by scaling
         x,y = round(nu), 1
     else:
         x, y = approx_nu(nu)
@@ -207,7 +210,7 @@ def estimate_target_upper_bound_ternary(n, w, sigma, k, m):
     bound_sup = np.linalg.norm(vec_bound)
     return bound_sup
 
-def estimate_target_upper_bound_ternary_vec(n, w, sigma, k, m):
+def estimate_target_upper_bound_ternary_vec(n, w, sigma, k, m, q):
     """
     Calcule une borne supérieure sur la norme du vecteur cible pour LWE ternaire.
 
@@ -218,7 +221,10 @@ def estimate_target_upper_bound_ternary_vec(n, w, sigma, k, m):
     """
     # 1) Calcul de nu et approximation rationnelle
     nu = sigma * sqrt((n - k) / w)
-    x, y = approx_nu(nu)
+    if q >= 2: # just round for don't increase the numerical instability by scaling
+        x,y = round(nu), 1
+    else:
+        x, y = approx_nu(nu)
 
     # 2) Répartition uniforme des w valeurs 'secret' dans n-k créneaux
     secret_zone = np.zeros(n - k, dtype=float)
@@ -259,11 +265,12 @@ def BaiGalCenteredScaledBinomial(n: int, q: int, w: int, sigma: float, lwe: Tupl
     t_vec = vector(QQ, [t for _ in range(n-k)])
 
     # approximate scaling factor as rational
-    if q >= 2**20: # just round for don't increase the numerical instability by scaling
+    if q >= 2: # just round for don't increase the numerical instability by scaling
         x,y = round(nu), 1
     else:
         x, y = approx_nu(nu)
     nu = ZZ(x)/ZZ(y)
+    print("nu in BaiGal: ", nu)
 
     # build basis
     top_rows = zero_matrix(m, n-k).augment(q * identity_matrix(m)).augment(zero_matrix(m, 1))

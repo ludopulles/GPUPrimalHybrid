@@ -21,6 +21,10 @@ from blaster import babai_last_gpu_batched
 import cupy as cp
 from fpylll.util import gaussian_heuristic
 
+# Remainder : install prerelease cupy 14.0.* with pip for having solve_triangular batched
+from cupyx.scipy.linalg import solve_triangular
+
+
 #from reduction import reduction
 def assign_tours(list_beta, svp_needed):
     n = len(list_beta)
@@ -239,21 +243,201 @@ def _value_batches(values, d, batch_size):
             break
         yield cp.asarray(block, dtype=cp.float64).T
 
-def _value_batches_fp32(values, d, batch_size):
-    it = product(values, repeat=d)
-    while True:
-        block = list(islice(it, batch_size))
-        if not block:
-            break
-        yield cp.asarray(block, dtype=cp.float32).T
 
-def _guess_batches(r, d, batch_size):
-    it = combinations(range(r), d)
-    while True:
-        block = list(islice(it, batch_size))
-        if not block:
-            break
-        yield cp.asarray(block, dtype=cp.int32)
+_vals64_src = r'''
+extern "C"{
+__global__ void gen_values_kernel_f64(const double* __restrict__ vals,
+                                      const int L, const int d,
+                                      const unsigned long long start_rank,
+                                      const int count,
+                                      double* __restrict__ out, const int ld)
+{
+    int t = blockDim.x * blockIdx.x + threadIdx.x;
+    if (t >= count) return;
+    unsigned long long idx = start_rank + (unsigned long long)t;
+    // colonne t, lignes 0..d-1 (Fortran: out[t*ld + row])
+    for (int p = d - 1; p >= 0; --p){
+        unsigned long long q   = idx / (unsigned long long)L;
+        unsigned int       rem = (unsigned int)(idx - q * (unsigned long long)L);
+        out[(size_t)t * ld + p] = vals[rem];
+        idx = q;
+    }
+}
+}'''
+_mod_vals64 = cp.RawModule(code=_vals64_src)
+_gen_vals64 = _mod_vals64.get_function('gen_values_kernel_f64')
+
+_src = r'''
+extern "C"{
+
+// values-product: enumerate base-L digits -> V (d, B) in Fortran layout
+__global__ void gen_values_kernel(const float* __restrict__ vals,
+                                  const int L, const int d,
+                                  const unsigned long long start_rank,
+                                  const int count,
+                                  float* __restrict__ out, const int ld)
+{
+    int t = blockDim.x * blockIdx.x + threadIdx.x;
+    if (t >= count) return;
+
+    unsigned long long idx = start_rank + (unsigned long long)t;
+
+    // write column t, rows 0..d-1 (Fortran: out[t*ld + row])
+    // compute most-significant first to match itertools.product order
+    for (int p = d - 1; p >= 0; --p){
+        unsigned long long q   = idx / (unsigned long long)L;
+        unsigned int       rem = (unsigned int)(idx - q * (unsigned long long)L);
+        out[(size_t)t * ld + p] = vals[rem];
+        idx = q;
+    }
+}
+
+__device__ __forceinline__ unsigned long long
+C_at(const unsigned long long* __restrict__ choose, int row, int col, int jdim) {
+#if __CUDA_ARCH__ >= 350
+    return __ldg(&choose[(size_t)row * jdim + col]);  // read-only cache
+#else
+    return choose[(size_t)row * jdim + col];
+#endif
+}
+
+// Lexicographic unranking with binary search per coordinate.
+// choose shape: (n+1, jdim), row-major: choose[row * jdim + col]
+__global__ void unrank_combinations_lex_bs(const unsigned long long* __restrict__ choose,
+                                           const int n, const int k,
+                                           const unsigned long long start_rank,
+                                           const int count,
+                                           int* __restrict__ out,
+                                           const int jdim)
+{
+    // grid-stride loop: support very large 'count'
+    for (int t = blockIdx.x * blockDim.x + threadIdx.x; t < count;
+         t += blockDim.x * gridDim.x)
+    {
+        unsigned long long s = start_rank + (unsigned long long)t; // rank for this thread
+        int a = 0;                                // minimal value for current coordinate
+        const int out_base = t * k;               // row-major output
+
+        // Build combo in increasing order (k entries)
+        // j goes from k down to 1 (same as ton code)
+        for (int j = k; j >= 1; --j) {
+            const int max_x = n - j;              // last admissible x (need room for j items)
+
+            // T = C(n - a, j), thr = T - s
+            const int row_na = n - a;
+            const unsigned long long T   = C_at(choose, row_na, j, jdim);
+            const unsigned long long thr = T - s; // > 0 (s < T automatiquement)
+
+            // find the **largest** x in [a, max_x] with C(n - x, j) >= thr
+            int lo = a, hi = max_x, ans = a;      // invariant: ans is last true
+            while (lo <= hi) {
+                const int mid = (lo + hi) >> 1;
+                const unsigned long long c = C_at(choose, n - mid, j, jdim);
+                if (c >= thr) { ans = mid; lo = mid + 1; }
+                else           {           hi = mid - 1; }
+            }
+            const int x = ans;
+
+            // write output (row-major). Option: column-major for coalesced writes (voir notes)
+            out[out_base + (k - j)] = x;
+
+            // update rank remainder and next lower bound
+            const unsigned long long c_x = C_at(choose, n - x, j, jdim);
+            // s <- s - (T - C(n - x, j))  (reste dans [0, C(n - x, j) - 1])
+            s -= (T - c_x);
+            a  = x + 1;
+        }
+    }
+}
+
+} // extern "C"
+'''.strip()
+
+_mod = cp.RawModule(code=_src, options=('-std=c++11',))
+_kernel_vals = _mod.get_function('gen_values_kernel')
+_kernel_comb = _mod.get_function('unrank_combinations_lex_bs')
+
+_TPB = 256
+
+# ===== helpers =====
+
+def _build_choose_table_dev(n: int, k: int) -> cp.ndarray:
+    """
+    choose_dev[u, j] = C(u, j) for u in [0..n], j in [0..k-1]
+    (on a besoin de j jusqu'à k-1 pour l'unranking lex)
+    """
+    import numpy as np
+    C = np.zeros((n+1, k), dtype=np.uint64)
+    C[:, 0] = 1
+    for u in range(1, n+1):
+        up_to = min(u, k-1)
+        for j in range(1, up_to+1):
+            C[u, j] = C[u-1, j] + C[u-1, j-1]
+    return cp.asarray(C)  # upload une seule fois
+
+# ===== GPU batchers =====
+
+def value_batches_fp32_gpu(values, d: int, batch_size: int):
+    """
+    Génère entièrement sur GPU les blocs V_gpu de forme (d, B) [Fortran],
+    équivalents à list(islice(product(values, repeat=d), ...)).T
+
+    values: 1D array-like -> sera upload une fois en float32.
+    """
+    vals_dev = values if isinstance(values, cp.ndarray) else cp.asarray(values, dtype=cp.float32)
+    L = int(vals_dev.size)
+    total = L ** d
+    assert total < (1 << 64), "L**d trop grand pour uint64."
+
+    start = 0
+    while start < total:
+        B = min(batch_size, total - start)
+        V_gpu = cp.empty((d, B), dtype=cp.float32, order='F')
+        grid = ((B + _TPB - 1) // _TPB, )
+        _kernel_vals(grid, (_TPB,),
+                     (vals_dev, cp.int32(L), cp.int32(d),
+                      cp.uint64(start), cp.int32(B),
+                      V_gpu, cp.int32(d)))
+        yield V_gpu
+        start += B
+
+def value_batches_fp64_gpu(values, d: int, batch_size: int):
+    vals = values if isinstance(values, cp.ndarray) else cp.asarray(values, dtype=cp.float64)
+    L = int(vals.size)
+    total = L ** d
+    start = 0
+    while start < total:
+        B = min(batch_size, total - start)
+        V = cp.empty((d, B), dtype=cp.float64, order='F')
+        _gen_vals64(((B + _TPB - 1)//_TPB,), (_TPB,),
+                    (vals, cp.int32(L), cp.int32(d),
+                     cp.uint64(start), cp.int32(B),
+                     V, cp.int32(d)))
+        yield V
+        start += B
+
+def guess_batches_gpu(r: int, d: int, batch_size: int, choose_dev: cp.ndarray = None):
+    """
+    Génère sur GPU les combinaisons (G, d) en ordre lexicographique,
+    équivalentes à list(islice(combinations(range(r), d), ...)).
+
+    choose_dev: table C(u, j) optionnelle (si None, construite et gardée côté device).
+    """
+    choose = choose_dev if choose_dev is not None else _build_choose_table_dev(r, d)
+    total = math.comb(r, d)
+    assert total < (1 << 64), "C(r,d) trop grand pour uint64."
+
+    start = 0
+    while start < total:
+        G = min(batch_size, total - start)
+        idxs_gpu = cp.empty((G, d), dtype=cp.int32)  # C-order
+        grid = ((G + _TPB - 1) // _TPB, )
+        _kernel_comb(grid, (_TPB,),
+                     (choose, cp.int32(r), cp.int32(d),
+                      cp.uint64(start), cp.int32(G),
+                      idxs_gpu, cp.int32(choose.shape[1])))
+        yield idxs_gpu
+        start += G
 
 # def svp_babai(basis, eta, columns_to_keep, A, b_vec, tau,
 #               n, k, m, secret_possible_values, search_space_dim,
@@ -388,7 +572,7 @@ def _guess_batches(r, d, batch_size):
 #     finish = time.time()
 #     return cp.asnumpy(B_try_gpu[:, -1]), finish - timestart
 
-def svp_babai(basis, eta, columns_to_keep, A, b_vec, tau,
+def svp_babai_fp64(basis, eta, columns_to_keep, A, b_vec, tau,
               n, k, m, secret_possible_values, search_space_dim,
               target_estimation, scaling_factor_y):
 
@@ -408,7 +592,7 @@ def svp_babai(basis, eta, columns_to_keep, A, b_vec, tau,
     tail_slice = slice(-m, None)   # <-- inconditionnel
     T = cp.asfortranarray(Q_gpu.T[:, tail_slice])  # d×m
     P = T @ C_all   
-    C0 = cp.linalg.solve(R_gpu, y0)                 # R c = y
+    C0 = solve_triangular(R_gpu, y0)                 # R c = y
     Z0 = cp.rint(C0)
     S0 = y0 - R_gpu @ Z0
     norm0 = cp.sum(S0 * S0)
@@ -438,7 +622,7 @@ def svp_babai(basis, eta, columns_to_keep, A, b_vec, tau,
                 P_flat = P_batch.reshape(nR*G, d)
                 E_flat = P_flat @ V_gpu
                 Y = y0[:, None] - scaling_factor_y * E_flat.reshape(nR, M)
-                C = cp.linalg.solve(R_gpu, Y)
+                C = solve_triangular(R_gpu, Y)
                 Z = cp.rint(C)
                 S = Y - R_gpu @ Z 
                 norms2 = cp.sum(S*S, axis=0)
@@ -484,7 +668,7 @@ def _recompute_candidate_fp64(basis, b_host, A, removed, m,
     Vb64   = cp.asarray(V_gpu[:, b], dtype=cp.float64)
     E64    = P64[:, idxs_g] @ Vb64
     Y64 = y064 - (scaling_factor_y * E64)
-    C64 = cp.linalg.solve(R64, Y64)
+    C64 = solve_triangular(R64, Y64)
     Z64 = cp.rint(C64)
     S64 = Y64 - R64 @ Z64
 
@@ -496,10 +680,111 @@ def _recompute_candidate_fp64(basis, b_host, A, removed, m,
         return cp.asnumpy(bprime64), True
     return None, False
 
+import time, math
+import numpy as np
+import cupy as cp
+from cupyx.scipy.linalg import solve_triangular
+from tqdm import tqdm
+
+# def svp_babai_fp64(basis, eta, columns_to_keep, A, b_vec, tau,
+#                    n, k, m, secret_possible_values, search_space_dim,
+#                    target_estimation, scaling_factor_y):
+#     timestart = time.time()
+
+#     # --- data on GPU in float64 ---
+#     basis_gpu = cp.asarray(basis, dtype=cp.float64, order='F')
+#     b_host = np.array(b_vec.list(), dtype=basis.dtype)
+#     b_gpu  = cp.asarray(b_host, dtype=cp.float64)
+#     subA_gpu = cp.asarray(A[:m, :], dtype=cp.float64)
+
+#     removed = [j for j in range(n) if j not in columns_to_keep]
+#     C_all   = subA_gpu[:, cp.asarray(removed, dtype=cp.int32)]  # (m, r)
+#     r = int(C_all.shape[1])
+
+#     has_tau = (b_gpu.shape[0] == basis_gpu.shape[0] + 1)
+#     b_used_gpu = b_gpu[:-1] if has_tau else b_gpu
+
+#     # --- QR on B in float64 ---
+#     B_gpu = basis_gpu.T  # (n, n)
+#     Q_gpu, R_gpu = cp.linalg.qr(B_gpu, mode='reduced')
+
+#     # --- coordinates of b in the Q-basis ---
+#     y0 = Q_gpu.T @ b_used_gpu                       # (n,)
+#     tail_slice = slice(-m, None)
+#     T = cp.asfortranarray(Q_gpu.T[:, tail_slice])   # d×m
+#     P = T @ C_all                                   # (d, r)
+
+#     # triangular solves in float64
+#     c0 = solve_triangular(R_gpu, y0)                # (nR,)
+#     U  = solve_triangular(R_gpu, P)                 # (nR, r)
+
+#     # --- quick Babai (no guesses) ---
+#     Z0 = cp.rint(c0)
+#     S0 = y0 - R_gpu @ Z0
+#     norm0 = cp.sum(S0 * S0)
+
+#     target_gpu = cp.asarray(target_estimation, dtype=cp.float64)
+#     norm_wanted2 = cp.dot(target_gpu, target_gpu)
+
+#     if bool((norm0 <= norm_wanted2).get()):
+#         bprime0 = b_used_gpu - B_gpu @ Z0
+#         finish = time.time()
+#         return cp.asnumpy(bprime0), finish - timestart
+
+#     # --- exhaustive guesses (all float64) ---
+#     GUESS_BATCH = 512
+#     VALUE_BATCH = 512
+#     nR = int(y0.shape[0])
+
+#     choose_dev = _build_choose_table_dev(r, search_space_dim + 1)
+#     vals_dev   = cp.asarray(secret_possible_values, dtype=cp.float64)
+
+#     for d in range(1, search_space_dim + 1):
+#         total_guesses = math.comb(r, d)
+#         print(f"guessing {total_guesses} number of positions of the last {d} non-zero coefficients of the secret")
+#         num_guess_batches = (total_guesses + GUESS_BATCH - 1) // GUESS_BATCH
+
+#         for idxs_gpu in tqdm(guess_batches_gpu(r, d, GUESS_BATCH, choose_dev=choose_dev),
+#                              total=num_guess_batches, desc=f"Guess-batch (d={d})"):
+#             U_batch = U[:, idxs_gpu]                 # (nR, G, d)
+#             G = int(idxs_gpu.shape[0])
+#             U_flat = U_batch.reshape(nR * G, d)      # (nR*G, d)
+
+#             # ensure V is float64
+#             for V_gpu in value_batches_fp64_gpu(vals_dev, d, VALUE_BATCH):
+#                 V_gpu = cp.asarray(V_gpu, dtype=cp.float64)  # (d, B)
+#                 B = int(V_gpu.shape[1])
+#                 M = G * B
+
+#                 E_flat = U_flat @ V_gpu                            # (nR*G, B)
+#                 Y = c0[:, None] - scaling_factor_y * E_flat.reshape(nR, M)  # (nR, M)
+
+#                 # same fast residual path, but in fp64
+#                 Z = Y - cp.rint(Y)
+#                 S = R_gpu @ Z
+#                 norms2 = cp.sum(S * S, axis=0)
+
+#                 idx = cp.where(norms2 <= norm_wanted2)[0]
+#                 if idx.size > 0:
+#                     k_hit = int(idx[0].get())
+#                     # recompute final candidate (already fp64 everywhere) but for comparaison with fp32 it's more clear to have the same recompute
+#                     bprime64, ok = _recompute_candidate_fp64(
+#                         basis, b_host, A, removed, m,
+#                         scaling_factor_y,
+#                         idxs_gpu, V_gpu, k_hit,
+#                         has_tau, target_estimation
+#                     )
+#                     if ok:
+#                         return bprime64, time.time() - timestart
+
+#     # fallback from no-hit path
+#     bprime0 = Q_gpu @ S0
+#     finish = time.time()
+#     return cp.asnumpy(bprime0), finish - timestart
+
 def svp_babai_fp32(basis, eta, columns_to_keep, A, b_vec, tau,
               n, k, m, secret_possible_values, search_space_dim,
               target_estimation, scaling_factor_y):
-    prune_tail = 16
     timestart = time.time()
     basis_gpu = cp.asarray(basis, dtype=cp.float32, order='F')
     b_host = np.array(b_vec.list(), dtype=basis.dtype)  
@@ -515,46 +800,52 @@ def svp_babai_fp32(basis, eta, columns_to_keep, A, b_vec, tau,
     #try to avoid error from QR 
     #Q_gpu, R_gpu = cp.linalg.qr(B_gpu, mode='reduced')
     Q_gpu, R_gpu = cp.linalg.qr(cp.asarray(basis, dtype=cp.float64, order='F').T, mode='reduced')
-    Q_gpu, R_gpu = Q_gpu.astype(cp.float32), R_gpu.astype(cp.float32)
+
 
     y0 = Q_gpu.T @ b_used_gpu                       # (n,)
     tail_slice = slice(-m, None)   # <-- inconditionnel
     T = cp.asfortranarray(Q_gpu.T[:, tail_slice])  # d×m
     P = T @ C_all   
-    C0 = cp.linalg.solve(R_gpu, y0)                 # R c = y
-    Z0 = cp.rint(C0)
+    c0 = solve_triangular(R_gpu, y0)        # (nR,)
+    U  = solve_triangular(R_gpu, P)        # (nR, r)  # TRSM multi-RHS
+
+
+    U,c0 = U.astype(cp.float32), c0.astype(cp.float32)
+    Q_gpu, R_gpu = Q_gpu.astype(cp.float32), R_gpu.astype(cp.float32)
+    #try without guess
+    Z0 = cp.rint(c0)
     S0 = y0 - R_gpu @ Z0
     norm0 = cp.sum(S0 * S0)
     norm_wanted2 = cp.asarray(float(np.dot(target_estimation, target_estimation)))
-    norm_wanted2_pruning = cp.asarray(float(np.dot(target_estimation[-prune_tail:], target_estimation[-prune_tail:])))
     if bool((norm0 <= norm_wanted2).get()):
         bprime0 = b_used_gpu - B_gpu @ Z0
         finish = time.time()
         return cp.asnumpy(bprime0), finish - timestart
-    GUESS_BATCH = 256
+
+
+    GUESS_BATCH = 512
     VALUE_BATCH = 512
     nR = int(y0.shape[0])
+    choose_dev = _build_choose_table_dev(r,  search_space_dim + 1)
+    vals_dev   = cp.asarray(secret_possible_values, dtype=cp.float32)
+
+    
     for d in range(1, search_space_dim + 1):
         total_guesses = math.comb(r, d)
         print(f"guessing {total_guesses} number of positions of the last {d} non-zero coefficients of the secret")
         num_guess_batches = (total_guesses + GUESS_BATCH - 1) // GUESS_BATCH
-
-        for idxs_batch in tqdm(_guess_batches(r, d, GUESS_BATCH),
+        for idxs_gpu in tqdm(guess_batches_gpu(r, d, GUESS_BATCH, choose_dev=choose_dev),
                                total=num_guess_batches, desc=f"Guess-batch (d={d})"):
-
-            idxs_gpu = cp.asarray(idxs_batch, dtype=cp.int32)
-            P_batch  = P[:, idxs_gpu] 
-
-            for V_gpu in _value_batches_fp32(secret_possible_values, d, VALUE_BATCH):
-                G = idxs_gpu.shape[0]
+            U_batch = U[:, idxs_gpu]                      # (nR, G, d)
+            G = idxs_gpu.shape[0]
+            U_flat = U_batch.reshape(nR*G, d)
+            for V_gpu in value_batches_fp32_gpu(vals_dev, d, VALUE_BATCH):
                 B = V_gpu.shape[1]
                 M = G * B
-                P_flat = P_batch.reshape(nR*G, d)
-                E_flat = P_flat @ V_gpu
-                Y = y0[:, None] - scaling_factor_y * E_flat.reshape(nR, M)
-                C = cp.linalg.solve(R_gpu, Y)
-                Z = cp.rint(C)
-                S = Y - R_gpu @ Z 
+                E_flat = U_flat @ V_gpu
+                Y = c0[:, None] - scaling_factor_y * E_flat.reshape(nR, M)
+                Z = Y - cp.rint(Y)
+                S = R_gpu @ Z
                 norms2 = cp.sum(S*S, axis=0)
                 idx = cp.where(norms2 <= norm_wanted2)[0]
                 if idx.size > 0:
@@ -611,22 +902,11 @@ def babai_ready(reduced_basis,
                 sigma=None, scaling_y=1.0,
                 target_estimation=None,
                 assume_columns=True,
-                # paramètres fallback (si target_estimation est None) :
-                m=None, u_rest=0, kappa=1.0,
-                safety=1.0, use_chi2=False, chi2_p=0.99):
+                safety=1.0):
     """
-    Retourne (ok, worst_i, worst_margin, r2, margins)
-
-    Deux modes:
-      - Avec `target_estimation` : borne globale ρ² = ||target_estimation||² (même que dans svp_babai).
-      - Sinon : modèle gaussien par suffixe avec (mesure + secret restant), option χ².
-
-    Paramètres fallback:
-      m       : nb de lignes 'mesure' (si None -> m = n)
-      u_rest  : nb attendu de coeffs de secret non devinés
-      kappa   : levier moyen des colonnes (≈1.0 conservateur)
-      safety  : marge multiplicative (>1 => plus conservateur)
-      use_chi2, chi2_p : si True, remplace la dimension effective ν par q_χ²(ν,p)
+    Return (ok, worst_i, worst_margin, r2, margins)
+    with `target_estimation` :  rho² = ||target_estimation||² (same as svp_babai).
+    safety  : marge  (0.85 in the estimator)
     """
     M = reduced_basis if assume_columns else reduced_basis.T
     # QR (CPU numpy; suffisant pour un check). Si tu veux GPU, remplace par cupy linalg.qr.
@@ -641,26 +921,7 @@ def babai_ready(reduced_basis,
         rho2 *= float(safety)**2        # optionnel: coussin
         margins = 0.25 * r2 - rho2      # même borne pour tous les étages
     else:
-        # --- MODE B : modèle bruit gaussien par suffixe (mesure + secret restant)
-        assert sigma is not None, "sigma must be provided when target_estimation is None"
-        sigma2 = (abs(float(scaling_y)) * float(sigma) * float(safety))**2
-        if m is None:
-            m = n
-        m = float(min(max(int(m), 0), n))
-
-        i = np.arange(n, dtype=float)
-        n_suffix = (n - i)                        # d, d-1, ..., 1
-        Le = (m / n) * n_suffix                   # partie 'mesure'
-        Ls = (float(kappa) * float(u_rest) / n) * n_suffix  # secret restant
-        nu = np.maximum(1.0, Le + Ls)             # "ddl" effectifs (≥1)
-
-        if use_chi2:
-            Q = np.array([_chi2_quantile_upper_bound(df, p=chi2_p) for df in nu], dtype=float)
-        else:
-            Q = nu
-
-        rho2_vec = sigma2 * Q
-        margins  = 0.25 * r2 - rho2_vec
+        print("sigma mode desactived")
 
     worst_i = int(np.argmin(margins))
     worst_margin = float(margins[worst_i])
@@ -719,6 +980,20 @@ def primal_attack(atk_params):
     #assert ((np.dot(A, s) + e) % q == b).all(), "LWE instance is not valid"
     return lwe
 
+
+SENT_FAIL0 = np.array([0,0])
+SENT_FAIL1 = np.array([1,1])
+
+def pick_columns_fast(lwe, params, iteration):
+    A, _, s, _ = lwe
+    n = A.shape[1]
+    m = params['k_dim'] * params['n'] - params['k']
+    rng = np.random.default_rng(int(iteration))
+    cols = rng.permutation(n)[:m]
+    s_np  = np.asarray(s)
+    mask  = (s_np != 0)
+    return cols, mask[cols]
+
 def drop_and_solve(lwe, params, iteration):
     """
     Placeholder for the function that drops and solves the LWE instance.
@@ -740,44 +1015,31 @@ def drop_and_solve(lwe, params, iteration):
     eta_svp = params['eta_svp']
 
     #new params
-    search_space = params['search_space']
+    dim_needed = params['h_']
     need_svp = False
-    if search_space > 1:
+    if dim_needed > 0:
         need_svp = True
         if params['secret_type'] == "binomial":
             secret_non_zero_coefficients_possible = [
                 i for i in range(-eta, eta+1) if i != 0
             ]
-            for hw in range(w):
-                search_space -= math.comb(k,hw)*len(secret_non_zero_coefficients_possible)**hw
-                if search_space == 0:
-                    dim_needed = hw
-                    break
-
         elif params['secret_type'] == "ternary":
             secret_non_zero_coefficients_possible = [-1,1]
-            for hw in range(w):
-                search_space -= math.comb(k,hw)*len(secret_non_zero_coefficients_possible)**hw
-                if search_space == 0:
-                    dim_needed = hw
-                    break
         else:
             raise(" Incorrect secret type")
-        # print(f"we need to guess {dim_needed} coefficients in the svp guessing part")
-    else:
-        dim_needed = 0 # just need one call without delete anything
-
     # drop columns
     # print(f"Iteration {iteration}: starting drop")
     _seed = iteration # for reproductibility
     #_seed = 0
-    np.random.seed(_seed)
+    # np.random.seed(_seed)
     if 'k_dim' in params:
         _,_,s,_ = lwe
-        columns_to_keep = sorted(np.random.choice(lwe[0].shape[1], params['k_dim']*params['n']-params['k'], replace=False))
-        good = [i for i in columns_to_keep if s[i] != 0]
-        if len(good) < w - 3:
-            return np.array([0, 0]), np.array([1, 1]) # false in the loop
+        columns_to_keep, mask = pick_columns_fast(lwe, params, iteration)
+        good_count = int(np.count_nonzero(mask))
+        if good_count < w - dim_needed:
+            return SENT_FAIL0, SENT_FAIL1 # false in the loop
+        else:
+            columns_to_keep.sort()
         # required = params['k_dim'] * params['n'] - params['k']
         # eligible = np.nonzero(s)[0]
         # non_eligible = np.where(s == 0)[0]
@@ -794,7 +1056,7 @@ def drop_and_solve(lwe, params, iteration):
         N = n
         basis, b_vec, target = BaiGalCenteredScaledTernary(n, q, w, sigma, lwe, k, m, columns_to_keep=columns_to_keep)
         sigma_error = sigma
-        estimation_vec, scaling_factor_y = estimate_target_upper_bound_ternary_vec(N, w, sigma, k, m)
+        estimation_vec, scaling_factor_y = estimate_target_upper_bound_ternary_vec(N, w, sigma, k, m, q)
     if params["secret_type"] == "binomial":
         N = n*params['k_dim']
         basis, b_vec, target = BaiGalModuleLWE(n, q, w, m, eta, lwe, k, columns_to_keep=columns_to_keep)
@@ -812,18 +1074,19 @@ def drop_and_solve(lwe, params, iteration):
         #delte all 0 last dimension (because no b_vec)
         basis = basis.delete_columns([ basis.ncols() - 1 ])
         reduced_basis, _ = reduction(basis, beta,eta_svp, target, estimation_vec)
-        prof = get_profile(reduced_basis)
+        prof = get_profile(reduced_basis.T)
         print("scaling factor on this basis :", scaling_factor_y)
-        plot_superposed_from_file_and_basis(beta, N, reduced_basis, prof_from_get_profile=prof, scaling_factor_y=scaling_factor_y)
+        plot_superposed_from_file_and_basis(beta, N, reduced_basis.T, prof_from_get_profile=prof, scaling_factor_y=scaling_factor_y)
         A,_,_,_ = lwe
         if babai:
-            ok, worst_i, worst_margin, r2, margins = babai_ready(reduced_basis, sigma_error, scaling_factor_y, m=m)
-            if ok:
+            ok, worst_i, worst_margin, r2, margins = babai_ready(reduced_basis, sigma_error, scaling_factor_y, target_estimation=estimation_vec, assume_columns=False)
+            print(worst_margin)
+            if True:
                 # Toutes les marges > 0 → Babai très probable
-                if q <= 2**20: # more than 10x faster in fp32
+                if q <= 2**20: # more than 15x faster in fp32
                     reduced_basis, _ = svp_babai_fp32(reduced_basis, eta_svp, columns_to_keep, A, b_vec, sigma_error, N,k,m, secret_non_zero_coefficients_possible, dim_needed, estimation_vec, scaling_factor_y)
                 else:
-                    reduced_basis, _ = svp_babai(reduced_basis, eta_svp, columns_to_keep, A, b_vec, sigma_error, N,k,m, secret_non_zero_coefficients_possible, dim_needed, estimation_vec, scaling_factor_y)
+                    reduced_basis, _ = svp_babai_fp64(reduced_basis, eta_svp, columns_to_keep, A, b_vec, sigma_error, N,k,m, secret_non_zero_coefficients_possible, dim_needed, estimation_vec, scaling_factor_y)
             else:
                  print(f"[Babai-check] Not ready: min margin = {worst_margin:.3e} at i={worst_i}. "
                              f"Skip Babai (need higher BKZ).")
@@ -846,7 +1109,6 @@ def drop_and_solve(lwe, params, iteration):
         target = np.concatenate((reduced_basis, [scaling_factor_y*round(sigma_error)]))
     else:
         target = reduced_basis[0]
-    
     #here reconstruct the real vector so 
     #N = params['k_dim']*n
     # nu = math.sqrt(eta/2) * math.sqrt((N - k) / (w * math.sqrt(eta/2)))
@@ -979,13 +1241,15 @@ def run_single_attack(params, run_id):
             params['beta'] = cost['beta']
             params['eta_svp'] = cost['eta']
             params['search_space'] = cost['|S|']
-            iterations = cost['repetitions']*100
+            params['h_'] = cost['h_']
+            iterations = cost['repetitions']
         lwe = primal_attack(params)
         cores = psutil.cpu_count(logical=False)
         result['available_cores'] = cores
 
-        start_time = time.time()
-        for i in range(iterations):
+
+        for i in tqdm(range(iterations)):
+            start_time = time.time()
             sv, target = drop_and_solve(lwe, params, i)
             result['iterations_used'] = i + 1
             if np.array_equal(sv, target) or np.array_equal(sv, -target):
