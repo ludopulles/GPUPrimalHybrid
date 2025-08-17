@@ -24,30 +24,11 @@ from fpylll.util import gaussian_heuristic
 # Remainder : install prerelease cupy 14.0.* with pip for having solve_triangular batched
 from cupyx.scipy.linalg import solve_triangular
 
-
-#from reduction import reduction
-def assign_tours(list_beta, svp_needed):
-    n = len(list_beta)
-    if n == 1:
-        return [8]
-    tours = []
-    for idx, b in enumerate(list_beta):
-        # DeepLLL or SVP always 1 tour
-        if b < 40 or (svp_needed and b == list_beta[-1] and b > 70):
-            tours.append(1)
-        else:
-            # Linear decrease from 8 down to 1 over the intermediate paliers
-            t = round(8 - (7 * idx) / (n - 1))
-            tours.append(int(t))
-    return tours
+from fpylll import IntegerMatrix, GSO, CVP, FPLLL, LLL, BKZ
 
 import hashlib
 
 def _basis_cache_path(beta, target, savedir="saved_basis", literal_target=False):
-    """
-    Construit le chemin du checkpoint. Par défaut on hash `target` pour un nom court.
-    Mets `literal_target=True` si tu veux un fichier exactement du type {beta}_{target}.npy.
-    """
     os.makedirs(savedir, exist_ok=True)
     if literal_target:
         t_str = ",".join(map(str, np.asarray(target, dtype=np.int64).tolist()))
@@ -72,7 +53,7 @@ def reduction(basis, beta, eta, target, target_estimation, svp=False,
     print("target norm", target_norm)
     print("target estimation", np.linalg.norm(target_estimation))
     bkz_prog = 10
-    tours_final = 8
+    tours_final = 1
     # progressive schedule
     list_beta = list(range(40 + ((beta - 40) % bkz_prog), beta + 1, bkz_prog))
 
@@ -439,204 +420,7 @@ def guess_batches_gpu(r: int, d: int, batch_size: int, choose_dev: cp.ndarray = 
         yield idxs_gpu
         start += G
 
-# def svp_babai(basis, eta, columns_to_keep, A, b_vec, tau,
-#               n, k, m, secret_possible_values, search_space_dim,
-#               target_estimation, scaling_factor_y):
 
-#     timestart = time.time()
-
-#     # --- données sur GPU ---
-#     basis_gpu = cp.asarray(basis, dtype=cp.float64, order='F')
-#     b_host = np.array(b_vec.list(), dtype=basis.dtype)   # arrive côté host
-#     b_gpu  = cp.asarray(b_host, dtype=cp.float64)
-#     subA_gpu = cp.asarray(A[:m, :], dtype=cp.float64)
-
-#     removed_cols = [j for j in range(n) if j not in columns_to_keep]
-#     # dictionnaire de colonnes… mais en GPU
-#     col_vecs = {j: subA_gpu[:, j] for j in removed_cols}
-
-#     has_tau = (b_gpu.shape[0] == basis_gpu.shape[0] + 1)
-#     b_used_gpu = b_gpu[:-1] if has_tau else b_gpu
-
-#     # B_try sur GPU
-#     B_try_gpu = cp.empty((basis_gpu.shape[1], basis_gpu.shape[0] + 1), dtype=cp.float64, order='F')
-#     B_try_gpu[:, :-1] = basis_gpu.T   # bloc gauche constant
-#     B_try_gpu[:, -1]  = b_used_gpu    # dernière colonne variable
-
-#     # QR du bloc gauche une seule fois, sur GPU
-#     Q_gpu, R_gpu = cp.linalg.qr(B_try_gpu[:, :-1], mode='reduced')
-
-#     # essai initial (toujours GPU) 
-#     B_try_gpu = babai_last_gpu_batched(B_try_gpu, Q_gpu, R_gpu)
-
-#     # seuil (reste en CPU en scalaire pour la comparaison)
-#     norm_wanted2 = float(np.dot(target_estimation, target_estimation))
-
-#     if float(B_try_gpu[:, -1].dot(B_try_gpu[:, -1]).get()) <= norm_wanted2:
-#         finish = time.time()
-#         return cp.asnumpy(B_try_gpu[:, -1]), finish - timestart
-
-#     tail_slice = (slice(-(m + 1), -1) if has_tau else slice(-m, None))
-
-#     BATCH = 512 # based on the VRAM
-
-#     for d in range(3, search_space_dim + 1):
-#         total_guesses = math.comb(len(removed_cols), d)
-#         for guess in tqdm(combinations(removed_cols, d),
-#                           total=total_guesses, desc=f"Combi ({d})"):
-#             vecs_gpu = cp.column_stack([col_vecs[j] for j in guess])
-#             for V_gpu in _value_batches(secret_possible_values, d, BATCH):
-
-#                 b_last_batch = cp.repeat((b_used_gpu[:, None]), V_gpu.shape[1], axis=1)
-#                 b_last_batch[-m:, :] -= (vecs_gpu @ V_gpu) * float(scaling_factor_y)
-
-#                 bprime_batch = babai_last_gpu_batched(b_last_batch, Q_gpu, R_gpu)
-
-#                 norms2 = cp.sum(bprime_batch * bprime_batch, axis=0)
-#                 mask   = norms2 <= norm_wanted2
-#                 if bool(mask.any().get()):
-#                     k = int(cp.where(mask)[0][0].get())
-#                     finish = time.time()
-#                     return cp.asnumpy(bprime_batch[:, k]), finish - timestart
-#     finish = time.time()
-#     return cp.asnumpy(B_try_gpu[:, -1]), finish - timestart
-
-# def svp_babai(basis, eta, columns_to_keep, A, b_vec, tau,
-#               n, k, m, secret_possible_values, search_space_dim,
-#               target_estimation, scaling_factor_y):
-
-#     timestart = time.time()
-
-#     # --- données sur GPU ---
-#     basis_gpu = cp.asarray(basis, dtype=cp.float64, order='F')
-#     b_host = np.array(b_vec.list(), dtype=basis.dtype)   # arrive côté host
-#     b_gpu  = cp.asarray(b_host, dtype=cp.float64)
-#     subA_gpu = cp.asarray(A[:m, :], dtype=cp.float64)
-
-#     removed = [j for j in range(n) if j not in columns_to_keep]
-#     C_all   = subA_gpu[:, cp.asarray(removed, dtype=cp.int32)]  # (m, r)
-#     r = C_all.shape[1]
-
-#     has_tau = (b_gpu.shape[0] == basis_gpu.shape[0] + 1)
-#     b_used_gpu = b_gpu[:-1] if has_tau else b_gpu
-
-#     B_try_gpu = cp.empty((basis_gpu.shape[1], basis_gpu.shape[0] + 1), dtype=cp.float64, order='F')
-#     B_try_gpu[:, :-1] = basis_gpu.T
-#     B_try_gpu[:, -1]  = b_used_gpu
-
-#     Q_gpu, R_gpu = cp.linalg.qr(B_try_gpu[:, :-1], mode='reduced')
-
-#     B_try_gpu = babai_last_gpu_batched(B_try_gpu, Q_gpu, R_gpu)
-
-#     norm_wanted2 = float(np.dot(target_estimation, target_estimation))
-
-#     if float(B_try_gpu[:, -1].dot(B_try_gpu[:, -1]).get()) <= norm_wanted2:
-#         finish = time.time()
-#         return cp.asnumpy(B_try_gpu[:, -1]), finish - timestart
-
-#     tail_slice = (slice(-(m + 1), -1) if has_tau else slice(-m, None))
-
-#     GUESS_BATCH = 64
-#     VALUE_BATCH = 512
-
-#     for d in range(2, search_space_dim + 1):
-#         total_guesses = math.comb(r, d)
-#         # on barre en "blocs de guesses"
-#         print(f"guessing {total_guesses} number of positions of the last {d} non-zero coefficients of the secret")
-#         num_guess_batches = (total_guesses + GUESS_BATCH - 1) // GUESS_BATCH
-#         for idxs_batch in tqdm(_guess_batches(r, d, GUESS_BATCH),
-#                             total=num_guess_batches, desc=f"Guess-batch (d={d})"):
-#             vecs_stack = C_all[:, idxs_batch]
-#             vecs_stack = vecs_stack.transpose(1, 0, 2)
-
-#             for V_gpu in _value_batches(secret_possible_values, d, VALUE_BATCH):
-#                 G = vecs_stack.shape[0]
-#                 B = V_gpu.shape[1]
-#                 M = G * B
-
-#                 corrections = vecs_stack @ V_gpu[None, :, :]
-#                 corrections *= float(scaling_factor_y)
-
-#                 b_last_batch = cp.repeat(b_used_gpu[:, None], M, axis=1)
-#                 tail = b_last_batch[-m:, :]
-#                 corr_flat = corrections.transpose(1, 0, 2).reshape(m, M)
-#                 tail -= corr_flat
-#                 bprime_batch = babai_last_gpu_batched(b_last_batch, Q_gpu, R_gpu)
-#                 norms2 = cp.sum(bprime_batch * bprime_batch, axis=0)
-#                 mask   = norms2 <= norm_wanted2
-#                 if bool(mask.any().get()):
-#                     k = int(cp.where(mask)[0][0].get())
-#                     finish = time.time()
-#                     print(cp.asnumpy(cp.rint(bprime_batch[:, k])).astype(np.int64))
-#                     return cp.asnumpy(cp.rint(bprime_batch[:, k])).astype(np.int64), finish - timestart
-#     finish = time.time()
-#     return cp.asnumpy(B_try_gpu[:, -1]), finish - timestart
-
-def svp_babai_fp64(basis, eta, columns_to_keep, A, b_vec, tau,
-              n, k, m, secret_possible_values, search_space_dim,
-              target_estimation, scaling_factor_y):
-
-    timestart = time.time()
-    basis_gpu = cp.asarray(basis, dtype=cp.float64, order='F')
-    b_host = np.array(b_vec.list(), dtype=basis.dtype)  
-    b_gpu  = cp.asarray(b_host, dtype=cp.float64)
-    subA_gpu = cp.asarray(A[:m, :], dtype=cp.float64)
-    removed = [j for j in range(n) if j not in columns_to_keep]
-    C_all   = subA_gpu[:, cp.asarray(removed, dtype=cp.int32)]  # (m, r)
-    r = C_all.shape[1]
-    has_tau = (b_gpu.shape[0] == basis_gpu.shape[0] + 1)
-    b_used_gpu = b_gpu[:-1] if has_tau else b_gpu
-    B_gpu = basis_gpu.T  # (n, n)
-    Q_gpu, R_gpu = cp.linalg.qr(B_gpu, mode='reduced')
-    y0 = Q_gpu.T @ b_used_gpu                       # (n,)
-    tail_slice = slice(-m, None)   # <-- inconditionnel
-    T = cp.asfortranarray(Q_gpu.T[:, tail_slice])  # d×m
-    P = T @ C_all   
-    C0 = solve_triangular(R_gpu, y0)                 # R c = y
-    Z0 = cp.rint(C0)
-    S0 = y0 - R_gpu @ Z0
-    norm0 = cp.sum(S0 * S0)
-    norm_wanted2 = cp.asarray(float(np.dot(target_estimation, target_estimation)))
-    if bool((norm0 <= norm_wanted2).get()):
-        bprime0 = b_used_gpu - B_gpu @ Z0
-        finish = time.time()
-        return cp.asnumpy(bprime0), finish - timestart
-    GUESS_BATCH = 64
-    VALUE_BATCH = 512
-    nR = int(y0.shape[0])
-    for d in range(1, search_space_dim + 1):
-        total_guesses = math.comb(r, d)
-        print(f"guessing {total_guesses} number of positions of the last {d} non-zero coefficients of the secret")
-        num_guess_batches = (total_guesses + GUESS_BATCH - 1) // GUESS_BATCH
-
-        for idxs_batch in tqdm(_guess_batches(r, d, GUESS_BATCH),
-                               total=num_guess_batches, desc=f"Guess-batch (d={d})"):
-
-            idxs_gpu = cp.asarray(idxs_batch, dtype=cp.int32)
-            P_batch  = P[:, idxs_gpu] 
-
-            for V_gpu in _value_batches(secret_possible_values, d, VALUE_BATCH):
-                G = idxs_gpu.shape[0]
-                B = V_gpu.shape[1]
-                M = G * B
-                P_flat = P_batch.reshape(nR*G, d)
-                E_flat = P_flat @ V_gpu
-                Y = y0[:, None] - scaling_factor_y * E_flat.reshape(nR, M)
-                C = solve_triangular(R_gpu, Y)
-                Z = cp.rint(C)
-                S = Y - R_gpu @ Z 
-                norms2 = cp.sum(S*S, axis=0)
-                idx = cp.where(norms2 <= norm_wanted2)[0]
-                if idx.size > 0:
-                    k = int(idx[0].get())
-                    z_win = Z[:, k]
-                    bprime_win = Q_gpu @ S[:, k]
-                    bprime_win = cp.rint(bprime_win)
-                    print(cp.asnumpy(bprime_win).astype(np.int64))
-                    return cp.asnumpy(bprime_win).astype(np.int64), time.time() - timestart
-    bprime0 = Q_gpu @ S0
-    finish = time.time()
-    return cp.asnumpy(bprime0), finish - timestart
 
 def _recompute_candidate_fp64(basis, b_host, A, removed, m,
                               scaling_factor_y,
@@ -686,105 +470,264 @@ import cupy as cp
 from cupyx.scipy.linalg import solve_triangular
 from tqdm import tqdm
 
-# def svp_babai_fp64(basis, eta, columns_to_keep, A, b_vec, tau,
-#                    n, k, m, secret_possible_values, search_space_dim,
-#                    target_estimation, scaling_factor_y):
-#     timestart = time.time()
+# ---------- GPU: Babai nearest-plane en FP64 pur ----------
+def babai_gpu_fp64(B, t, do_qr_reduce=True):
+    """
+    B: (n,n) ndarray int/float (sera casté en float64)
+    t: (n,)   ndarray int/float (sera casté en float64)
 
-#     # --- data on GPU in float64 ---
-#     basis_gpu = cp.asarray(basis, dtype=cp.float64, order='F')
-#     b_host = np.array(b_vec.list(), dtype=basis.dtype)
-#     b_gpu  = cp.asarray(b_host, dtype=cp.float64)
-#     subA_gpu = cp.asarray(A[:m, :], dtype=cp.float64)
+    Retour:
+        dict(v, z, resid2, t_sec)
+        - v = B z (numpy.float64)
+        - z = coeffs (numpy.int64)
 
-#     removed = [j for j in range(n) if j not in columns_to_keep]
-#     C_all   = subA_gpu[:, cp.asarray(removed, dtype=cp.int32)]  # (m, r)
-#     r = int(C_all.shape[1])
+    NOTE: ici on factorise B^T (QR sur B_gpu.T), comme dans ton code original.
+          Si tu veux la forme "classique" de Babai: utilise Q,R = qr(B) puis
+          y = Q^T t ; z = round(R^{-1} y) ; v = B z.
+    """
+    t0 = time.time()
 
-#     has_tau = (b_gpu.shape[0] == basis_gpu.shape[0] + 1)
-#     b_used_gpu = b_gpu[:-1] if has_tau else b_gpu
+    # Cast et mise en mémoire GPU
+    B_gpu = cp.asarray(np.asarray(B, dtype=np.float64), dtype=cp.float64, order="F")  # (n,n)
+    t_gpu = cp.asarray(np.asarray(t, dtype=np.float64), dtype=cp.float64)
 
-#     # --- QR on B in float64 ---
-#     B_gpu = basis_gpu.T  # (n, n)
-#     Q_gpu, R_gpu = cp.linalg.qr(B_gpu, mode='reduced')
+    # QR en 64 bits (sur B^T dans cette version)
+    Q, R = (cp.linalg.qr(B_gpu.T, mode="reduced") if do_qr_reduce else (None, None))
 
-#     # --- coordinates of b in the Q-basis ---
-#     y0 = Q_gpu.T @ b_used_gpu                       # (n,)
-#     tail_slice = slice(-m, None)
-#     T = cp.asfortranarray(Q_gpu.T[:, tail_slice])   # d×m
-#     P = T @ C_all                                   # (d, r)
+    if do_qr_reduce:
+        y = Q.T @ t_gpu
+        z = cp.rint(solve_triangular(R, y))
+        v = (B_gpu.T @ z)
 
-#     # triangular solves in float64
-#     c0 = solve_triangular(R_gpu, y0)                # (nR,)
-#     U  = solve_triangular(R_gpu, P)                 # (nR, r)
+    resid = (t_gpu - v)
+    out = {
+        "v": cp.asnumpy(cp.rint(v)).astype(np.int64),
+        "z": cp.asnumpy(z).astype(np.int64),
+        "resid2": float(cp.dot(resid, resid).get()),
+        "t_sec": time.time() - t0,
+    }
+    return out
 
-#     # --- quick Babai (no guesses) ---
-#     Z0 = cp.rint(c0)
-#     S0 = y0 - R_gpu @ Z0
-#     norm0 = cp.sum(S0 * S0)
+# ---------- CPU fpylll : choisit auto CVP.babai si t entier, sinon GSO.Mat.babai ----------
+def babai_fpylll_auto(B_int_like, t_vec, prec_bits=64, do_reduce=False):
+    """
+    B_int_like : matrice d'entiers (structure d’embedding typique -> parfait)
+    t_vec      : cible; si entière -> CVP.babai, sinon -> GSO.Mat.babai (mpfr)
 
-#     target_gpu = cp.asarray(target_estimation, dtype=cp.float64)
-#     norm_wanted2 = cp.dot(target_gpu, target_gpu)
+    Retour:
+        dict(v, z|None, resid2, t_sec, mode, prec_bits)
+    """
+    t0 = time.time()
+    B = IntegerMatrix.from_matrix(B_int_like)
 
-#     if bool((norm0 <= norm_wanted2).get()):
-#         bprime0 = b_used_gpu - B_gpu @ Z0
-#         finish = time.time()
-#         return cp.asnumpy(bprime0), finish - timestart
+    # test "entier" robuste
+    t_np = np.asarray(t_vec, dtype=np.float64)
+    is_int = np.allclose(t_np, np.rint(t_np), rtol=0, atol=0)
 
-#     # --- exhaustive guesses (all float64) ---
-#     GUESS_BATCH = 512
-#     VALUE_BATCH = 512
-#     nR = int(y0.shape[0])
+    if False:
+        v = CVP.babai(B, list(map(int, np.rint(t_np))))
+        v_np = np.array(v, dtype=np.int64)
+        mode = "CVP.babai"
+        z = None
+    else:
+        FPLLL.set_precision(int(prec_bits)) 
+        M = GSO.Mat(B, float_type="mpfr", update=True)
+        w = M.babai(list(map(float, t_np)))
+        v_np = np.array(B.multiply_left(w), dtype=object) 
+        mode = "GSO.Mat.babai"
+        z = None
 
-#     choose_dev = _build_choose_table_dev(r, search_space_dim + 1)
-#     vals_dev   = cp.asarray(secret_possible_values, dtype=cp.float64)
+    resid2 = float(np.sum((t_np.astype(np.float64) - v_np.astype(np.float64))**2))
+    return {
+        "v": v_np,
+        "z": None if z is None else z,
+        "resid2": resid2,
+        "t_sec": time.time() - t0,
+        "mode": mode,
+        "prec_bits": prec_bits,
+    }
 
-#     for d in range(1, search_space_dim + 1):
-#         total_guesses = math.comb(r, d)
-#         print(f"guessing {total_guesses} number of positions of the last {d} non-zero coefficients of the secret")
-#         num_guess_batches = (total_guesses + GUESS_BATCH - 1) // GUESS_BATCH
 
-#         for idxs_gpu in tqdm(guess_batches_gpu(r, d, GUESS_BATCH, choose_dev=choose_dev),
-#                              total=num_guess_batches, desc=f"Guess-batch (d={d})"):
-#             U_batch = U[:, idxs_gpu]                 # (nR, G, d)
-#             G = int(idxs_gpu.shape[0])
-#             U_flat = U_batch.reshape(nR * G, d)      # (nR*G, d)
+# Try comparaison with FPLLL
+def compare_babai(
+    B,
+    t,
+    fpylll_prec_bits=512,
+    fpylll_reduce=False,
+    bkz_beta=None,
+    bkz_loops=1,
+    gpu_qr=True,
+):
+    # CPU (fpylll)
+    cpu = babai_fpylll_auto(B, t, prec_bits=fpylll_prec_bits, do_reduce=fpylll_reduce)
 
-#             # ensure V is float64
-#             for V_gpu in value_batches_fp64_gpu(vals_dev, d, VALUE_BATCH):
-#                 V_gpu = cp.asarray(V_gpu, dtype=cp.float64)  # (d, B)
-#                 B = int(V_gpu.shape[1])
-#                 M = G * B
+    # GPU (CuPy fp64)
+    gpu = babai_gpu_fp64(B, t, do_qr_reduce=gpu_qr)
 
-#                 E_flat = U_flat @ V_gpu                            # (nR*G, B)
-#                 Y = c0[:, None] - scaling_factor_y * E_flat.reshape(nR, M)  # (nR, M)
+    same_v = np.array_equal(
+        np.asarray(cpu["v"], dtype=np.int64),
+        np.asarray(np.rint(gpu["v"]), dtype=np.int64),
+    )
 
-#                 # same fast residual path, but in fp64
-#                 Z = Y - cp.rint(Y)
-#                 S = R_gpu @ Z
-#                 norms2 = cp.sum(S * S, axis=0)
+    report = {
+        "cpu_mode": cpu["mode"],
+        "cpu_resid2": cpu["resid2"],
+        "cpu_time_s": cpu["t_sec"],
+        "gpu_resid2": gpu["resid2"],
+        "gpu_time_s": gpu["t_sec"],
+        "same_lattice_vector_int": bool(same_v),
+        "resid2_ratio_gpu_over_cpu": (gpu["resid2"] / max(cpu["resid2"], 1e-300)),
+        "cpu_z_available": cpu["z"] is not None,
+        "gpu_z_first10": gpu["z"][: min(10, len(gpu["z"]))].tolist(),
+    }
+    return report, cpu, gpu
 
-#                 idx = cp.where(norms2 <= norm_wanted2)[0]
-#                 if idx.size > 0:
-#                     k_hit = int(idx[0].get())
-#                     # recompute final candidate (already fp64 everywhere) but for comparaison with fp32 it's more clear to have the same recompute
-#                     bprime64, ok = _recompute_candidate_fp64(
-#                         basis, b_host, A, removed, m,
-#                         scaling_factor_y,
-#                         idxs_gpu, V_gpu, k_hit,
-#                         has_tau, target_estimation
-#                     )
-#                     if ok:
-#                         return bprime64, time.time() - timestart
 
-#     # fallback from no-hit path
-#     bprime0 = Q_gpu @ S0
-#     finish = time.time()
-#     return cp.asnumpy(bprime0), finish - timestart
+def center_lift(x, q):
+    r = np.remainder(x, q)          # in [0, q)
+    r = np.where(r > q/2, r - q, r) # to (−q/2, q/2]
+    return r
+
+
+def matvec_mod_q(A, s, q, block=256):
+    m, n = A.shape
+    acc = np.zeros(m, dtype=object)     # sûr mais plus lent
+    for j0 in range(0, n, block):
+        j1 = min(n, j0+block)
+        acc = (acc + (A[:, j0:j1].astype(object) @ s[j0:j1].astype(object))) % q
+    return np.asarray(acc, dtype=object)
+
+def lwe_error_from_secret_safe(A, b, s, q):
+    r = (b.astype(object) - matvec_mod_q(A, s, q)) % q
+    e = ((r + q//2) % q) - q//2  # center lift version object-safe
+    return np.asarray(e, dtype=int)
+
+def svp_babai_fp64(basis, eta, columns_to_keep, A, b_vec, tau,
+              n, k, m, secret_possible_values, search_space_dim,
+              target_estimation, scaling_factor_y, q, lwe, hw): # need to be optimized in the same way as fp32
+    timestart = time.time()
+    basis_gpu = cp.asarray(basis, dtype=cp.float64, order='F')
+    b_host = np.array(b_vec.list(), dtype=basis.dtype)  
+    b_gpu  = cp.asarray(b_host, dtype=cp.float64)
+    subA_gpu = cp.asarray(A[:m, :], dtype=cp.float64)
+    removed = [j for j in range(n) if j not in columns_to_keep]
+    C_all   = subA_gpu[:, cp.asarray(removed, dtype=cp.int32)]  # (m, r)
+    r = C_all.shape[1]
+    has_tau = (b_gpu.shape[0] == basis_gpu.shape[0] + 1)
+    b_used_gpu = b_gpu[:-1] if has_tau else b_gpu
+    B_gpu = basis_gpu.T  # (n, n)
+
+    #try to avoid error from QR 
+    #Q_gpu, R_gpu = cp.linalg.qr(B_gpu, mode='reduced')
+    Q_gpu, R_gpu = cp.linalg.qr(cp.asarray(basis, dtype=cp.float64, order='F').T, mode='reduced')
+
+
+    y0 = Q_gpu.T @ b_used_gpu
+    tail_slice = slice(-m, None)
+    T = cp.asfortranarray(Q_gpu.T[:, tail_slice])
+    P = T @ C_all   
+    c0 = solve_triangular(R_gpu, y0)
+    U  = solve_triangular(R_gpu, P)
+    #try without guess
+    Z0 = cp.rint(c0)
+    v = (B_gpu @ Z0)
+    norm_wanted = np.linalg.norm(target_estimation[:n-k])
+    norm_wanted2 = np.linalg.norm(target_estimation[:n-k])**2 
+    if bool((cp.linalg.norm(v[:n-k]) <= norm_wanted and cp.linalg.norm(v[:n-k])**2 >= hw).get()): # <= eta * scaling_factor_y * (hamming_weight) but not all zeros just > hw number
+        x_scaling = 5
+        A,b,_,_ = lwe
+        s = cp.rint(v).astype(cp.int64)[:n-k]
+        e = lwe_error_from_secret_safe(A[:m, columns_to_keep], b[:m], cp.asnumpy(s)/x_scaling, q)
+        e2 = lwe_error_from_secret_safe(A[:m, columns_to_keep], b[:m], cp.asnumpy(-s)/x_scaling, q)
+        #reconstruct the target vector
+        s = cp.asnumpy(s)
+        e = cp.asnumpy(e)
+        target = np.concatenate((s,e))
+        if np.linalg.norm(target) > np.linalg.norm(target_estimation):
+            s = -s
+            e = cp.asnumpy(e2)
+        target = np.concatenate((s,e))
+        print(target)
+        finish = time.time()
+        return target, finish - timestart
+
+
+    GUESS_BATCH = 512
+    VALUE_BATCH = 512
+    nR = int(y0.shape[0])
+    choose_dev = _build_choose_table_dev(r,  search_space_dim + 1)
+    vals_dev   = cp.asarray(secret_possible_values, dtype=cp.float32)
+
+    B_head64 = cp.asfortranarray(B_gpu[:n-k, :].astype(cp.float64, copy=False))
+    A_removed = A[:m, np.array(removed, dtype=int)]      # (m, r)
+    for d in range(1, search_space_dim+1):
+        total_guesses = math.comb(r, d)
+        print(f"guessing {total_guesses} number of positions of the last {d} non-zero coefficients of the secret")
+        num_guess_batches = (total_guesses + GUESS_BATCH - 1) // GUESS_BATCH
+        nonzero_target = hw - d
+        for idxs_gpu in tqdm(guess_batches_gpu(r, d, GUESS_BATCH, choose_dev=choose_dev),
+                               total=num_guess_batches, desc=f"Guess-batch (d={d})"):
+            U_batch = U[:, idxs_gpu]                      # (nR, G, d)
+            G = idxs_gpu.shape[0]
+            U_flat = U_batch.reshape(nR*G, d)
+            for V_gpu in value_batches_fp32_gpu(vals_dev, d, VALUE_BATCH):
+                B = V_gpu.shape[1]
+                M = G * B
+                E_flat = (U_flat @ V_gpu.astype(cp.float64))
+                Y = c0[:, None] - E_flat.reshape(nR, M)
+                Z = cp.rint(Y)
+                S_head = B_head64 @ Z 
+                s_int = cp.rint(S_head).astype(cp.int32) # discretize to integers before counting
+                nz_counts = cp.count_nonzero(s_int, axis=0)  # shape: (M,)
+                mask_hw = (nz_counts == nonzero_target)      # boolean mask over candidates (M,)
+                idx_hw = cp.where(mask_hw)[0]
+                if idx_hw.size > 0:
+                    S = B_gpu @ (Y - Z) # it's just the residual of babai (so the real s of babai algo)
+                    idxv = int(idx_hw[0].get())
+                    if cp.linalg.norm(cp.rint(S[:,idxv])) <= np.linalg.norm(target_estimation):
+                        return cp.asnumpy(cp.rint(S[:,idxv]).astype(cp.int64)), time.time() - timestart
+                    #fallback possible 
+
+                    # #check that it's hase exactly hamming_weight - d entry
+                    # #find aswell the guessed value
+                    # idxv = int(idx_hw[0].get())
+                    # num_vals = V_gpu.shape[1]                           # B
+                    # idxv     = int(idx_hw[0].get())
+                    # g_idx    = idxv // num_vals
+                    # b_idx    = idxv %  num_vals
+                    # # indices devinés pour ce candidat, et valeurs devinées correspondantes
+                    # id_subset = idxs_gpu[g_idx]                         # (d,)
+                    # vals_d    = V_gpu[:, b_idx]                           # (d,)
+                    # x_scaling = 2
+                    # A,b,_,_ = lwe
+                    # v = s_int[:, idxv]
+                    # s = cp.rint(v).astype(cp.int64)
+                    # # >>> IMPORTANT : soustraire la contribution devinée côté "removed"
+                    # # b_eff = b - (A_removed[:, id_subset] @ (vals_d / x_scaling))
+                    # # (adapte le scaling pour être EXACTEMENT celui de ta base)
+                    # A_rm_sub = A_removed[:, cp.asnumpy(id_subset)]
+                    # v_guess  = cp.asnumpy(vals_d)
+                    # b_eff    = b[:m] - (A_rm_sub @ v_guess)
+                    # e = lwe_error_from_secret_safe(A[:m, columns_to_keep], b_eff, cp.asnumpy(s)/x_scaling, q)
+                    # e2 = lwe_error_from_secret_safe(A[:m, columns_to_keep], b_eff, cp.asnumpy(-s)/x_scaling, q)
+                    # #reconstruct the target vector
+                    # s = cp.asnumpy(s)
+                    # e = cp.asnumpy(e)
+                    # target = np.concatenate((s,e))
+                    # if np.linalg.norm(target) > np.linalg.norm(target_estimation):
+                    #     s = -s
+                    #     e = cp.asnumpy(e2)
+                    # target = np.concatenate((s,e))
+                    # print(target)
+                    # finish = time.time()
+                    # return target, finish - timestart
+    bprime0 = B_gpu @ Z0
+    finish = time.time()
+    return cp.asnumpy(bprime0), finish - timestart
 
 def svp_babai_fp32(basis, eta, columns_to_keep, A, b_vec, tau,
               n, k, m, secret_possible_values, search_space_dim,
-              target_estimation, scaling_factor_y):
+              target_estimation, scaling_factor_y, hw):
     timestart = time.time()
     basis_gpu = cp.asarray(basis, dtype=cp.float32, order='F')
     b_host = np.array(b_vec.list(), dtype=basis.dtype)  
@@ -823,15 +766,19 @@ def svp_babai_fp32(basis, eta, columns_to_keep, A, b_vec, tau,
         return cp.asnumpy(bprime0), finish - timestart
 
 
-    GUESS_BATCH = 512
+    GUESS_BATCH = 4096
     VALUE_BATCH = 512
+    PRE_SECRET_TEST = hw + 2
     nR = int(y0.shape[0])
     choose_dev = _build_choose_table_dev(r,  search_space_dim + 1)
     vals_dev   = cp.asarray(secret_possible_values, dtype=cp.float32)
 
-    
-    for d in range(1, search_space_dim + 1):
+    B_head32 = cp.asfortranarray(B_gpu[:n-k, :].astype(cp.float32, copy=False))
+    B_head_opti = cp.asfortranarray(B_gpu[:PRE_SECRET_TEST, :].astype(cp.float32, copy=False))
+    # 3h16 to 2h02 with only check secret target (on 1641247665 * 4**4 try) and up to 1h22 with pre_test and increase batch size
+    for d in range(1, search_space_dim+1):
         total_guesses = math.comb(r, d)
+        nonzero_target = hw - d
         print(f"guessing {total_guesses} number of positions of the last {d} non-zero coefficients of the secret")
         num_guess_batches = (total_guesses + GUESS_BATCH - 1) // GUESS_BATCH
         for idxs_gpu in tqdm(guess_batches_gpu(r, d, GUESS_BATCH, choose_dev=choose_dev),
@@ -842,24 +789,37 @@ def svp_babai_fp32(basis, eta, columns_to_keep, A, b_vec, tau,
             for V_gpu in value_batches_fp32_gpu(vals_dev, d, VALUE_BATCH):
                 B = V_gpu.shape[1]
                 M = G * B
-                E_flat = U_flat @ V_gpu
-                Y = c0[:, None] - scaling_factor_y * E_flat.reshape(nR, M)
-                Z = Y - cp.rint(Y)
-                S = R_gpu @ Z
-                norms2 = cp.sum(S*S, axis=0)
-                idx = cp.where(norms2 <= norm_wanted2)[0]
-                if idx.size > 0:
-                    k = int(idx[0].get())
-                    #recompute all in float64 here for recover well
-                    bprime64, ok = _recompute_candidate_fp64(
-                        basis, b_host, A, removed, m,
-                        scaling_factor_y,
-                        idxs_gpu, V_gpu, k,
-                        has_tau, target_estimation
-                    )
-                    print(bprime64)
-                    if ok:
-                        return bprime64, time.time() - timestart
+                #just do a float64 2min30 and 1min40 for a full FP32
+                E_flat = (U_flat @ V_gpu)
+                #suppose no scaling factor here
+                Y = c0[:, None] - E_flat.reshape(nR, M)
+                Z = cp.rint(Y)
+                #precheck for don't compute whole secret each time
+                S_test = B_head_opti @ Z
+
+                hit_test = cp.any((cp.abs(S_test) >= 0.5).sum(axis=0, dtype=cp.int32) <= nonzero_target)
+                if bool(hit_test):
+                    S = B_head32 @ (Z) # closest to the lattice
+                    hit = cp.any((cp.abs(S) >= 0.5).sum(axis=0, dtype=cp.int32) == nonzero_target)
+                    if bool(hit):
+                        #find the index of the hit
+                        s_int = cp.rint(S).astype(cp.int32) # discretize to integers before counting
+                        nz_counts = cp.count_nonzero(s_int, axis=0)  # shape: (M,)
+                        mask_hw = (nz_counts == nonzero_target)      # boolean mask over candidates (M,)
+                        idx = cp.where(mask_hw)[0]
+                        k = int(idx[0].get())
+                        #just return this
+                        return cp.asnumpy(((B_gpu @ (Y-Z))[:,k]).astype(cp.int64)), time.time() -timestart
+                        #or recompute all in float64 here for recover well
+                        bprime64, ok = _recompute_candidate_fp64(
+                            basis, b_host, A, removed, m,
+                            scaling_factor_y,
+                            idxs_gpu, V_gpu, k,
+                            has_tau, target_estimation
+                        )
+                        print(bprime64)
+                        if ok:
+                            return bprime64, time.time() - timestart
     bprime0 = Q_gpu @ S0
     finish = time.time()
     return cp.asnumpy(bprime0), finish - timestart
@@ -984,11 +944,11 @@ def primal_attack(atk_params):
 SENT_FAIL0 = np.array([0,0])
 SENT_FAIL1 = np.array([1,1])
 
-def pick_columns_fast(lwe, params, iteration):
+def pick_columns_fast(lwe, params, seed):
     A, _, s, _ = lwe
     n = A.shape[1]
     m = params['k_dim'] * params['n'] - params['k']
-    rng = np.random.default_rng(int(iteration))
+    rng = np.random.default_rng(int(seed))
     cols = rng.permutation(n)[:m]
     s_np  = np.asarray(s)
     mask  = (s_np != 0)
@@ -1029,12 +989,12 @@ def drop_and_solve(lwe, params, iteration):
             raise(" Incorrect secret type")
     # drop columns
     # print(f"Iteration {iteration}: starting drop")
-    _seed = iteration # for reproductibility
-    #_seed = 0
+    _seed =  int.from_bytes(os.urandom(4))
+    #_seed = iteration
     # np.random.seed(_seed)
     if 'k_dim' in params:
         _,_,s,_ = lwe
-        columns_to_keep, mask = pick_columns_fast(lwe, params, iteration)
+        columns_to_keep, mask = pick_columns_fast(lwe, params, _seed)
         good_count = int(np.count_nonzero(mask))
         if good_count < w - dim_needed:
             return SENT_FAIL0, SENT_FAIL1 # false in the loop
@@ -1076,17 +1036,18 @@ def drop_and_solve(lwe, params, iteration):
         reduced_basis, _ = reduction(basis, beta,eta_svp, target, estimation_vec)
         prof = get_profile(reduced_basis.T)
         print("scaling factor on this basis :", scaling_factor_y)
-        plot_superposed_from_file_and_basis(beta, N, reduced_basis.T, prof_from_get_profile=prof, scaling_factor_y=scaling_factor_y)
+        #plot_superposed_from_file_and_basis(beta, N, reduced_basis.T, prof_from_get_profile=prof, scaling_factor_y=scaling_factor_y)
         A,_,_,_ = lwe
         if babai:
             ok, worst_i, worst_margin, r2, margins = babai_ready(reduced_basis, sigma_error, scaling_factor_y, target_estimation=estimation_vec, assume_columns=False)
             print(worst_margin)
             if True:
                 # Toutes les marges > 0 → Babai très probable
-                if q <= 2**20: # more than 15x faster in fp32
-                    reduced_basis, _ = svp_babai_fp32(reduced_basis, eta_svp, columns_to_keep, A, b_vec, sigma_error, N,k,m, secret_non_zero_coefficients_possible, dim_needed, estimation_vec, scaling_factor_y)
+                if False: # 2x faster in fp32
+                    print(compare_babai(reduced_basis, b_vec[:-1]))
+                    reduced_basis, _ = svp_babai_fp64(reduced_basis, eta_svp, columns_to_keep, A, b_vec, sigma_error, N,k,m, secret_non_zero_coefficients_possible, dim_needed, estimation_vec, scaling_factor_y, q, lwe, w)
                 else:
-                    reduced_basis, _ = svp_babai_fp64(reduced_basis, eta_svp, columns_to_keep, A, b_vec, sigma_error, N,k,m, secret_non_zero_coefficients_possible, dim_needed, estimation_vec, scaling_factor_y)
+                    reduced_basis, _ = svp_babai_fp32(reduced_basis, eta_svp, columns_to_keep, A, b_vec, sigma_error, N,k,m, secret_non_zero_coefficients_possible, dim_needed, estimation_vec, scaling_factor_y, w)
             else:
                  print(f"[Babai-check] Not ready: min margin = {worst_margin:.3e} at i={worst_i}. "
                              f"Skip Babai (need higher BKZ).")
@@ -1105,6 +1066,7 @@ def drop_and_solve(lwe, params, iteration):
     # print(f"target: {target}")
     # print(f"reduced basis: {reduced_basis[0]}")
     target_precompute = target
+    print("the one we wanted",target)
     if babai:
         target = np.concatenate((reduced_basis, [scaling_factor_y*round(sigma_error)]))
     else:
@@ -1268,7 +1230,7 @@ def run_single_attack(params, run_id):
 
     return result
 
-def batch_attack(atk_params, repeats=1, output_csv='attack_results.csv'):
+def batch_attack(atk_params, repeats=10, output_csv='attack_results.csv'):
     fieldnames = [
         'run_id', 'n', 'log_q', 'w', 'secret_type', 'sigma', 'eta',
         'available_cores', 'success', 'iterations_used', 'time_elapsed', 'estimated_time', 'error'
