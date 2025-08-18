@@ -1,0 +1,334 @@
+diff --git a/attack.py b/attack.py
+index 4828c6a..ed53fa7 100644
+--- a/attack.py
++++ b/attack.py
+@@ -18,6 +18,8 @@ from utilities import approx_nu
+ from blaster import reduce
+ from blaster import get_profile, slope, rhf
+ from blaster import babai_last_gpu_batched
++from estimator import *
++
+ import cupy as cp
+ from fpylll.util import gaussian_heuristic
+ 
+@@ -28,6 +30,10 @@ from fpylll import IntegerMatrix, GSO, CVP, FPLLL, LLL, BKZ
+ 
+ import hashlib
+ 
++from itertools import combinations, product 
++from itertools import islice
++from tqdm import tqdm
++
+ def _basis_cache_path(beta, target, savedir="saved_basis", literal_target=False):
+     os.makedirs(savedir, exist_ok=True)
+     if literal_target:
+@@ -55,7 +61,7 @@ def reduction(basis, beta, eta, target, target_estimation, svp=False,
+     bkz_prog = 10
+     tours_final = 1
+     # progressive schedule
+-    list_beta = list(range(40 + ((beta - 40) % bkz_prog), beta + 1, bkz_prog))
++    list_beta = [30] + list(range(40 + ((beta - 40) % bkz_prog), beta + 1, bkz_prog))
+ 
+     for i, beta in enumerate(list_beta):
+         # ---------- CHECKPOINT: charge si dispo ----------
+@@ -149,8 +155,6 @@ def reduction(basis, beta, eta, target, target_estimation, svp=False,
+     return B_np.T, finish - timestart
+ 
+ 
+-from itertools import combinations, product 
+-from tqdm import tqdm
+ 
+ def svp(basis, eta,columns_to_keep, A, b_vec, tau, n,k,m, secret_possible_values, search_space_dim, target_estimation, scaling_factor_y):
+     timestart = time.time()
+@@ -214,7 +218,6 @@ def svp(basis, eta,columns_to_keep, A, b_vec, tau, n,k,m, secret_possible_values
+     finish = time.time()
+     return B_try.T, finish - timestart
+ 
+-from itertools import islice
+ 
+ def _value_batches(values, d, batch_size):
+     it = product(values, repeat=d)
+@@ -347,7 +350,6 @@ def _build_choose_table_dev(n: int, k: int) -> cp.ndarray:
+     choose_dev[u, j] = C(u, j) for u in [0..n], j in [0..k-1]
+     (on a besoin de j jusqu'à k-1 pour l'unranking lex)
+     """
+-    import numpy as np
+     C = np.zeros((n+1, k), dtype=np.uint64)
+     C[:, 0] = 1
+     for u in range(1, n+1):
+@@ -360,10 +362,10 @@ def _build_choose_table_dev(n: int, k: int) -> cp.ndarray:
+ 
+ def value_batches_fp32_gpu(values, d: int, batch_size: int):
+     """
+-    Génère entièrement sur GPU les blocs V_gpu de forme (d, B) [Fortran],
+-    équivalents à list(islice(product(values, repeat=d), ...)).T
++    Compute on GPU (no H2D overhead for send the batch) blocks V_gpu,
++    it's equal (but here CPU bounded) to list(islice(product(values, repeat=d), ...)).T
+ 
+-    values: 1D array-like -> sera upload une fois en float32.
++    values: 1D array-like 
+     """
+     vals_dev = values if isinstance(values, cp.ndarray) else cp.asarray(values, dtype=cp.float32)
+     L = int(vals_dev.size)
+@@ -399,14 +401,12 @@ def value_batches_fp64_gpu(values, d: int, batch_size: int):
+ 
+ def guess_batches_gpu(r: int, d: int, batch_size: int, choose_dev: cp.ndarray = None):
+     """
+-    Génère sur GPU les combinaisons (G, d) en ordre lexicographique,
+-    équivalentes à list(islice(combinations(range(r), d), ...)).
+-
+-    choose_dev: table C(u, j) optionnelle (si None, construite et gardée côté device).
++    Generate (G, d) on the GPU in lexicographic order.
++    choose_dev: optional C(u, j) table (if None, it is built and stored on the device).
+     """
+     choose = choose_dev if choose_dev is not None else _build_choose_table_dev(r, d)
+     total = math.comb(r, d)
+-    assert total < (1 << 64), "C(r,d) trop grand pour uint64."
++    assert total < (1 << 64), "C(r, d) too large for uint64."
+ 
+     start = 0
+     while start < total:
+@@ -427,7 +427,7 @@ def _recompute_candidate_fp64(basis, b_host, A, removed, m,
+                               idxs_gpu, V_gpu, k,
+                               has_tau, target_estimation):
+     """
+-    Recalcule en FP64 *depuis la base* (QR, P, solve, arrondi) pour le candidat k.
++    Recompute in FP64 *from the basis* (QR, P, solve, rounding) for candidate k.
+     """
+     # Map index k -> (g, b) dans la matrice Y de taille M = G*B
+     G = int(idxs_gpu.shape[0])
+@@ -464,26 +464,16 @@ def _recompute_candidate_fp64(basis, b_host, A, removed, m,
+         return cp.asnumpy(bprime64), True
+     return None, False
+ 
+-import time, math
+-import numpy as np
+-import cupy as cp
+-from cupyx.scipy.linalg import solve_triangular
+-from tqdm import tqdm
+-
+ # ---------- GPU: Babai nearest-plane en FP64 pur ----------
+ def babai_gpu_fp64(B, t, do_qr_reduce=True):
+     """
+-    B: (n,n) ndarray int/float (sera casté en float64)
+-    t: (n,)   ndarray int/float (sera casté en float64)
++    B: (n,n) ndarray int/float (will be cast to float64)
++    t: (n,)   ndarray int/float (will be cast to float64)
+ 
+-    Retour:
++    Return:
+         dict(v, z, resid2, t_sec)
+         - v = B z (numpy.float64)
+         - z = coeffs (numpy.int64)
+-
+-    NOTE: ici on factorise B^T (QR sur B_gpu.T), comme dans ton code original.
+-          Si tu veux la forme "classique" de Babai: utilise Q,R = qr(B) puis
+-          y = Q^T t ; z = round(R^{-1} y) ; v = B z.
+     """
+     t0 = time.time()
+ 
+@@ -511,10 +501,10 @@ def babai_gpu_fp64(B, t, do_qr_reduce=True):
+ # ---------- CPU fpylll : choisit auto CVP.babai si t entier, sinon GSO.Mat.babai ----------
+ def babai_fpylll_auto(B_int_like, t_vec, prec_bits=64, do_reduce=False):
+     """
+-    B_int_like : matrice d'entiers (structure d’embedding typique -> parfait)
+-    t_vec      : cible; si entière -> CVP.babai, sinon -> GSO.Mat.babai (mpfr)
++    B_int_like : integer matrix (typical embedding structure -> exact)
++    t_vec      : target; if integer -> CVP.babai, otherwise -> GSO.Mat.babai (mpfr)
+ 
+-    Retour:
++    Return:
+         dict(v, z|None, resid2, t_sec, mode, prec_bits)
+     """
+     t0 = time.time()
+@@ -654,11 +644,13 @@ def svp_babai_fp64(basis, eta, columns_to_keep, A, b_vec, tau,
+ 
+     GUESS_BATCH = 512
+     VALUE_BATCH = 512
++    PRE_SECRET_TEST = hw + 2
+     nR = int(y0.shape[0])
+     choose_dev = _build_choose_table_dev(r,  search_space_dim + 1)
+     vals_dev   = cp.asarray(secret_possible_values, dtype=cp.float32)
+ 
+     B_head64 = cp.asfortranarray(B_gpu[:n-k, :].astype(cp.float64, copy=False))
++    B_sub_opti = cp.asfortranarray(B_gpu[:PRE_SECRET_TEST, :].astype(cp.float32, copy=False))
+     A_removed = A[:m, np.array(removed, dtype=int)]      # (m, r)
+     for d in range(1, search_space_dim+1):
+         total_guesses = math.comb(r, d)
+@@ -676,17 +668,20 @@ def svp_babai_fp64(basis, eta, columns_to_keep, A, b_vec, tau,
+                 E_flat = (U_flat @ V_gpu.astype(cp.float64))
+                 Y = c0[:, None] - E_flat.reshape(nR, M)
+                 Z = cp.rint(Y)
+-                S_head = B_head64 @ Z 
+-                s_int = cp.rint(S_head).astype(cp.int32) # discretize to integers before counting
+-                nz_counts = cp.count_nonzero(s_int, axis=0)  # shape: (M,)
+-                mask_hw = (nz_counts == nonzero_target)      # boolean mask over candidates (M,)
+-                idx_hw = cp.where(mask_hw)[0]
+-                if idx_hw.size > 0:
+-                    S = B_gpu @ (Y - Z) # it's just the residual of babai (so the real s of babai algo)
+-                    idxv = int(idx_hw[0].get())
+-                    if cp.linalg.norm(cp.rint(S[:,idxv])) <= np.linalg.norm(target_estimation):
+-                        return cp.asnumpy(cp.rint(S[:,idxv]).astype(cp.int64)), time.time() - timestart
+-                    #fallback possible 
++                S_test = B_sub_opti @ Z 
++                hit_test = cp.any((cp.abs(S_test) >= 0.5).sum(axis=0, dtype=cp.int64) <= nonzero_target)
++                if bool(hit_test):
++                    S = B_head64 @ (Z) # closest to the lattice
++                    hit = cp.any((cp.abs(S) >= 0.5).sum(axis=0, dtype=cp.int64) == nonzero_target)
++                    if bool(hit):
++                        #find the index of the hit
++                        s_int = cp.rint(S).astype(cp.int64) # discretize to integers before counting
++                        nz_counts = cp.count_nonzero(s_int, axis=0)  # shape: (M,)
++                        mask_hw = (nz_counts == nonzero_target)      # boolean mask over candidates (M,)
++                        idx = cp.where(mask_hw)[0]
++                        k = int(idx[0].get())
++                        #just return this
++                        return cp.asnumpy(((B_gpu @ (Y-Z))[:,k]).astype(cp.int64)), time.time() -timestart
+ 
+                     # #check that it's hase exactly hamming_weight - d entry
+                     # #find aswell the guessed value
+@@ -865,21 +860,19 @@ def babai_ready(reduced_basis,
+                 safety=1.0):
+     """
+     Return (ok, worst_i, worst_margin, r2, margins)
+-    with `target_estimation` :  rho² = ||target_estimation||² (same as svp_babai).
+-    safety  : marge  (0.85 in the estimator)
++    with `target_estimation`:  rho² = ||target_estimation||² (same as svp_babai).
++    safety: margin (0.85 in the estimator)
+     """
+     M = reduced_basis if assume_columns else reduced_basis.T
+-    # QR (CPU numpy; suffisant pour un check). Si tu veux GPU, remplace par cupy linalg.qr.
+     R = np.linalg.qr(np.asarray(M), mode='r')
+     r2 = np.square(np.diag(R))         # ||b_i^*||^2
+     n  = r2.shape[0]
+ 
+     if target_estimation is not None:
+-        # --- MODE A : borne vecteur explicite (cohérent avec ton test runtime)
+         rho2 = float(np.dot(np.asarray(target_estimation, float),
+                             np.asarray(target_estimation, float)))
+-        rho2 *= float(safety)**2        # optionnel: coussin
+-        margins = 0.25 * r2 - rho2      # même borne pour tous les étages
++        rho2 *= float(safety)**2
++        margins = 0.25 * r2 - rho2
+     else:
+         print("sigma mode desactived")
+ 
+@@ -893,24 +886,21 @@ def plot_superposed_from_file_and_basis(beta, n, reduced_basis, prof_from_get_pr
+                                         dirpath="saved_profiles", fname_tpl="prof_b{beta}_n{n}.npy",
+                                         title_extra=None):
+     """
+-    Charge reduced_profile/prof_{beta}_{n}.npy (supposé en log2),
+-    convertit le 'prof' mesuré au même format log2, et trace la superposition.
++    Load reduced_profile/prof_{beta}_{n}.npy (assumed in log2),
++    convert the measured 'prof' to the same log2 format, and plot the overlay.
+     """
+-    # 1) fichier sauvegardé (log2)
+     path = os.path.join(dirpath, fname_tpl.format(beta=beta, n=n))
+     r_file_log2 = (np.load(path))/2
+     d_file = len(r_file_log2)
+-
+-    # 2) profil mesuré (converti en log2)
+     
+     r_meas_log2 = (prof_from_get_profile - np.log2(scaling_factor_y)) # maybe to be squared
+     d_meas = len(r_meas_log2)
+ 
+     d = min(d_file, d_meas)
+     if d_file != d_meas:
+-        print(f"[warn] tailles différentes: file={d_file}, mesuré={d_meas}. Tronque à {d}.")
++        print(f"[warn] size mismatch: file={d_file}, measured={d_meas}. Truncating to {d}.")
+ 
+-    # 3) plot
++    # plot
+     i = np.arange(1, d + 1)
+     fig, ax = plt.subplots(figsize=(7, 4))
+     ax.plot(i, r_file_log2[:d], lw=1.8, label=f"saved: prof_{beta}_{n}.npy (log2)")
+@@ -925,8 +915,6 @@ def plot_superposed_from_file_and_basis(beta, n, reduced_basis, prof_from_get_pr
+     ax.legend()
+     plt.tight_layout()
+     plt.show()
+-
+-    # petit diagnostic
+     diff = r_meas_log2[:d] - r_file_log2[:d]
+     print(f"Δ mean={diff.mean():.3f}, std={diff.std(ddof=1):.3f}, max|Δ|={np.abs(diff).max():.3f}")
+ 
+@@ -1041,10 +1029,9 @@ def drop_and_solve(lwe, params, iteration):
+         if babai:
+             ok, worst_i, worst_margin, r2, margins = babai_ready(reduced_basis, sigma_error, scaling_factor_y, target_estimation=estimation_vec, assume_columns=False)
+             print(worst_margin)
+-            if True:
+-                # Toutes les marges > 0 → Babai très probable
++            if True: # not test if it's ok just see the worst margin
+                 if False: # 2x faster in fp32
+-                    print(compare_babai(reduced_basis, b_vec[:-1]))
++                    # print(compare_babai(reduced_basis, b_vec[:-1]))
+                     reduced_basis, _ = svp_babai_fp64(reduced_basis, eta_svp, columns_to_keep, A, b_vec, sigma_error, N,k,m, secret_non_zero_coefficients_possible, dim_needed, estimation_vec, scaling_factor_y, q, lwe, w)
+                 else:
+                     reduced_basis, _ = svp_babai_fp32(reduced_basis, eta_svp, columns_to_keep, A, b_vec, sigma_error, N,k,m, secret_non_zero_coefficients_possible, dim_needed, estimation_vec, scaling_factor_y, w)
+@@ -1093,57 +1080,11 @@ def drop_and_solve(lwe, params, iteration):
+ 
+     return target, target_precompute
+ 
+-from estimator import *
+-
+-def next_power_or_sum(d: int) -> int:
+-    """
+-    Pour un entier d >= 1, renvoie le plus petit nombre >= d parmi :
+-      - 2^n
+-      - 2^n + 2^(n-1)
+-    en testant pour n = floor(log2(d)) et n+1.
+-    """
+-
+-    if d < 1:
+-        raise ValueError("d doit être un entier >= 1")
+-
+-    # exposant de base
+-    n0 = math.floor(math.log2(d))
+-
+-    candidats = set()
+-
+-    # pour n0 et n0+1, générer 2^n et 2^n + 2^(n-1)
+-    for n in (n0, n0 + 1):
+-        p = 2 ** n
+-        candidats.add(p)
+-        if n >= 1:
+-            candidats.add(p + 2 ** (n - 1))
+-
+-    # ne garder que ceux >= d, puis prendre le plus petit
+-    candidats_sup = [x for x in candidats if x >= d]
+-    # et si d est proche du min du sup alors on prend celui ci 
+-    return min(candidats_sup)
+-
+-def success_probability(n, k, w):
+-    """
+-    Probabilité qu'aucune des w colonnes utiles ne se trouve
+-    parmi les k colonnes éliminées.
+-    """
+-    return math.comb(n - w, k) / math.comb(n, k)
+-
+ def expected_draws(n, k, w):
+-    """
+-    Espérance du nombre de tirages jusqu'au premier succès.
+-    """
+-    p = success_probability(n, k, w)
++    p = math.comb(n - w, k) / math.comb(n, k)
+     return 1 / p
+-
+ def draws_for_confidence(n, k, w, confidence=0.99):
+-    """
+-    Nombre minimal de tirages pour être certain au niveau
+-    'confidence' de capturer au moins une fois toutes les w colonnes utiles.
+-    """
+     p = success_probability(n, k, w)
+-    # on résout (1 - (1-p)^t) >= confidence
+     t = math.log(1 - confidence) / math.log(1 - p)
+     return math.ceil(t)
+ 
+@@ -1230,7 +1171,7 @@ def run_single_attack(params, run_id):
+ 
+     return result
+ 
+-def batch_attack(atk_params, repeats=10, output_csv='attack_results.csv'):
++def batch_attack(atk_params, repeats=1, output_csv='attack_results.csv'):
+     fieldnames = [
+         'run_id', 'n', 'log_q', 'w', 'secret_type', 'sigma', 'eta',
+         'available_cores', 'success', 'iterations_used', 'time_elapsed', 'estimated_time', 'error'
