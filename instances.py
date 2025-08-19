@@ -270,7 +270,7 @@ def BaiGalCenteredScaledBinomial(n: int, q: int, w: int, sigma: float, lwe: Tupl
     else:
         x, y = approx_nu(nu)
     nu = ZZ(x)/ZZ(y)
-    print("nu in BaiGal: ", nu)
+    #print("nu in BaiGal: ", nu)
 
     # build basis
     top_rows = zero_matrix(m, n-k).augment(q * identity_matrix(m)).augment(zero_matrix(m, 1))
@@ -312,7 +312,7 @@ def BaiGalModuleLWE(
 
     s_eq = balance(vector(Zmod(q), s_eq.tolist()), q)
 
-    print("Secret :", s_eq)
+    # print("Secret :", s_eq)
     # print("hamming weight of it:", hamming_weight(s_eq))
     # print("n, q, w, sigma,k, m, eta =",N, q,w,sigma,target_k,M,2)
     basis, b_vec, target = BaiGalCenteredScaledBinomial(
