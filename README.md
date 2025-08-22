@@ -15,8 +15,8 @@ The attack implements a hybrid primal attack against LWE instances with differen
 ## Prerequisites
 
 - CUDA-compatible GPU(s) (or cupy with ROCm for AMD GPUs - not tested)
+- CUDA toolkit installed (version 11.0 or higher recommended)
 - Conda, mamba, or a similar environment manager (conda recommended for the use of install.sh)
-
 
 ## Installation
 
@@ -39,30 +39,13 @@ attack_params.py: Contains a list of parameter sets for different LWE instances 
 
 ## Usage Details
 
-Set the numbers of workers and chunk size in attack_multithread.py according to your hardware capabilities. 
+Set the numbers of workers and chunk size in attack_multithread.py according to your hardware capabilities.
+
 - `num_workers`: Number of parallel workers (ideally a multiple of the number of GPUs and CPU cores, but may be limited by GPUs VRAM)
 - `chunk_size`: Number of iterations per worker before checking for a solution (larger chunks reduce overhead but may lead to imbalanced workloads)
 - `GUESS_BATCH`: Number of batches to process in each guess (affects GPUs memory usage and performance)
 
 Adjust the parameters in attack_params.py to specify the LWE instances you want to attack.
-
-
-### LWE Instance Creation
-
-The system creates LWE instances based on parameters such as dimension, modulus, and error distribution.
-
-```python
-lwe = CreateLWEInstance(
-    n,              # dimension
-    q,              # modulus
-    m,              # number of samples
-    w,              # hamming weight of secret
-    sigma,          # standard deviation of error (for Gaussian errors)
-    type_of_secret,  # "ternary" or "binomial"
-    eta=None,       # parameter for binomial distribution
-    k_dim=None      # for module-LWE
-)
-```
 
 ### Lattice Embedding
 
@@ -71,20 +54,9 @@ For the primal attack, the system creates lattice embeddings using either:
 - `BaiGalCenteredScaledTernary`: For ternary secrets with Gaussian errors
 - `BaiGalModuleLWE`: For module-LWE with binomial secrets
 
-### Lattice Reduction
-
-The system applies progressive BKZ reduction to the lattice:
-
-```python
-reduced_basis, time_taken = reduction(
-    basis,
-    beta,              # BKZ block size
-    eta,               # expected number of non-zero coordinates
-    target,            # target vector
-    target_estimation, # estimation of the target norm
-    svp=False          # whether to embed the target vector into the basis during reduction
-)
-```
+The ternary secrets embedding and ternary LWE instance creation are taken from the [Cool+Cruel=Dual](
+    https://gitlab.com/fvirdia/cool-plus-cruel-equals-dual
+) repository.
 
 ### GPU-Accelerated Babai's Algorithm
 
@@ -111,6 +83,7 @@ See svp_babai_fp64_nr_projected in attack_multithread.py for more details on the
 See also kernel_babai.py for the implementation of the Babai's Nearest Plane algorithm on the GPU. (This is a GPU version base on BLASter batched Babai's Nearest Plane algorithm)
 
 ### Result Handling
+
 The results of the attack are collected and saved in a CSV file, including:
 
 - `run_id`: Unique identifier for the run
@@ -134,6 +107,7 @@ To run the attack, execute the following command:
 ```bash
 python attack_multithread.py
 ```
+
 And optionally specify the number of workers and chunk size in the script.
 
 The `atk_params` should contain a list of parameter dictionaries, each specifying:
