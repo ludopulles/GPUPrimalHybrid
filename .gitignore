@@ -6,3 +6,4 @@ saved_profiles
 *.png
 *.nsys-rep
 *.sqlite
+.ruff_cache

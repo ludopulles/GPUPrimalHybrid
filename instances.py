@@ -1,8 +1,16 @@
-from sage.all import PolynomialRing, ZZ, QQ, Zmod, randint, matrix, zero_matrix, identity_matrix, vector, sample # type: ignore #noqa
-from sage.crypto.lwe import DiscreteGaussianDistributionPolynomialSampler as DRGauss # type: ignore #noqa
-from sage.crypto.lwe import DiscreteGaussianDistributionIntegerSampler as DGauss # type: ignore #noqa
-from typing import Callable, Tuple, List
-from utilities import balance, round_down, approx_nu
+from sage.all import (
+    ZZ,
+    QQ,
+    Zmod,
+    matrix,
+    zero_matrix,
+    identity_matrix,
+    vector,
+)  # type: ignore #noqa
+from sage.crypto.lwe import DiscreteGaussianDistributionPolynomialSampler as DRGauss  # type: ignore #noqa
+from sage.crypto.lwe import DiscreteGaussianDistributionIntegerSampler as DGauss  # type: ignore #noqa
+from typing import Tuple, List
+from utilities import balance, approx_nu
 from math import sqrt, ceil, pi
 import numpy as np
 
@@ -91,15 +99,24 @@ import numpy as np
 # def CBDRLWE(n: int, q: int, eta: int, err_std: float = 3.2):
 #     return RLWE(n, q, err_std=err_std, secr_distr=lambda: CBD(eta))
 
-def BaiGalCenteredScaledTernary(n: int, q: int, w: int, sigma: float, lwe: Tuple,k: int, m: int, columns_to_keep: List[int]):
+
+def BaiGalCenteredScaledTernary(
+    n: int,
+    q: int,
+    w: int,
+    sigma: float,
+    lwe: Tuple,
+    k: int,
+    m: int,
+    columns_to_keep: List[int],
+):
     # [ 0, (y * q) I_m, 0 // -x I_{n-k} ,  y A2^t, 0 // 0, y (b - A2 (t One))^t, y]
     A, b, __s, __e = lwe
     kannan_coeff = QQ(round(sigma))
 
     # keep given columns, first m rows, drop the rest
-    assert (n - k == len(columns_to_keep))
-    A2 = matrix(QQ, [[A[row][col] for col in columns_to_keep]
-                for row in range(m)])
+    assert n - k == len(columns_to_keep)
+    A2 = matrix(QQ, [[A[row][col] for col in columns_to_keep] for row in range(m)])
     b2 = vector(QQ, b[:m])
     __s2 = vector(ZZ, [__s[col] for col in columns_to_keep])
 
@@ -109,30 +126,44 @@ def BaiGalCenteredScaledTernary(n: int, q: int, w: int, sigma: float, lwe: Tuple
 
     # DON'T shift vector <-------------
     t = ZZ(0)
-    nu = sigma * sqrt((n-k)/w)
-    t_vec = vector(QQ, [t for _ in range(n-k)])
+    nu = sigma * sqrt((n - k) / w)
+    t_vec = vector(QQ, [t for _ in range(n - k)])
 
     # approximate scaling factor as rational
-    if q >= 2: # just round for don't increase the numerical instability by scaling
-        x,y = round(nu), 1
+    if q >= 2:  # just round for don't increase the numerical instability by scaling
+        x, y = round(nu), 1
     else:
         x, y = approx_nu(nu)
-    nu = ZZ(x)/ZZ(y)
+    nu = ZZ(x) / ZZ(y)
 
     # build basis
-    top_rows = zero_matrix(m, n-k).augment(q * identity_matrix(m)).augment(zero_matrix(m, 1))
-    mid_rows = (-nu * identity_matrix(n-k)).augment(A2.transpose()
-                                                    ).augment(zero_matrix(n-k, 1))
-    bot_rows = zero_matrix(QQ, 1, n-k).augment(matrix(QQ, b2 -
-                                                      A2 * t_vec)).augment(kannan_coeff * identity_matrix(1))
+    top_rows = (
+        zero_matrix(m, n - k).augment(q * identity_matrix(m)).augment(zero_matrix(m, 1))
+    )
+    mid_rows = (
+        (-nu * identity_matrix(n - k))
+        .augment(A2.transpose())
+        .augment(zero_matrix(n - k, 1))
+    )
+    bot_rows = (
+        zero_matrix(QQ, 1, n - k)
+        .augment(matrix(QQ, b2 - A2 * t_vec))
+        .augment(kannan_coeff * identity_matrix(1))
+    )
     basis = top_rows.stack(mid_rows).stack(bot_rows)
     basis = matrix(ZZ, t.denominator() * y * basis)
 
     # print("target = y (n-k) * [nu (s - t One) || e || round(sigma)]")
-    target = balance(vector(ZZ, t.denominator() * y * vector(QQ, list(nu *
-                     (__s2 - t_vec)) + list(__e[:m]) + [kannan_coeff])), q=t.denominator() * y * q)
-    return basis[:-1],basis[-1], target
-    
+    target = balance(
+        vector(
+            ZZ,
+            t.denominator()
+            * y
+            * vector(QQ, list(nu * (__s2 - t_vec)) + list(__e[:m]) + [kannan_coeff]),
+        ),
+        q=t.denominator() * y * q,
+    )
+    return basis[:-1], basis[-1], target
 
 
 def estimate_target_upper_bound_binomial(n, w, sigma, k, m, eta, q):
@@ -140,75 +171,84 @@ def estimate_target_upper_bound_binomial(n, w, sigma, k, m, eta, q):
     Calcule une borne supérieure sur la norme du vecteur cible.
     """
     # Calcul de nu
-    stddev_secret = 1/(sqrt(1 - sqrt(2/(pi*eta))))
+    stddev_secret = 1 / (sqrt(1 - sqrt(2 / (pi * eta))))
     nu = sigma * sqrt((n - k) / (w * stddev_secret))
     # Approximation rationnelle nu
-    if q >= 2: # just round for don't increase the numerical instability by scaling
-        x,y = round(nu), 1
+    if q >= 2:  # just round for don't increase the numerical instability by scaling
+        x, y = round(nu), 1
     else:
         x, y = approx_nu(nu)
-    
+
     # Construction du vecteur de borne
-    vec_bound = np.concatenate([
-        np.full(w, x * eta),      # secret
-        np.full(m, y * sigma),      # erreur
-        [y * sigma]                 # coefficient Kannan
-    ])
-    
+    vec_bound = np.concatenate(
+        [
+            np.full(w, x * eta),  # secret
+            np.full(m, y * sigma),  # erreur
+            [y * sigma],  # coefficient Kannan
+        ]
+    )
+
     # Borne supérieure de la norme
     bound_sup = np.linalg.norm(vec_bound)
     return bound_sup
+
 
 def estimate_target_upper_bound_binomial_vec(n, w, sigma, k, m, eta, q):
     """
     Calcule une borne supérieure sur la norme du vecteur cible.
     """
     # Calcul de nu
-    stddev_secret = 1/(sqrt(1 - sqrt(2/(pi*eta))))
+    stddev_secret = 1 / (sqrt(1 - sqrt(2 / (pi * eta))))
     nu = sigma * sqrt((n - k) / (w * stddev_secret))
     # Approximation rationnelle nu
-    if q >= 2: # just round for don't increase the numerical instability by scaling
-        x,y = round(nu), 1
+    if q >= 2:  # just round for don't increase the numerical instability by scaling
+        x, y = round(nu), 1
     else:
         x, y = approx_nu(nu)
-    
 
     secret_zone = np.zeros(n - k, dtype=float)
     # positions uniformes arrondies
     positions = np.floor(np.linspace(0, (n - k) - 1, w)).astype(int)
     secret_zone[positions] = x * eta
     # Construction du vecteur de borne
-    vec_bound = np.concatenate([
-        secret_zone,      # secret
-        np.full(m, y * eta),      # erreur (eta instead of sigma to be sure that it print the solution, is not necessarily needed)
-        [y * round(sigma)]                 # coefficient Kannan
-    ])
-    
+    vec_bound = np.concatenate(
+        [
+            secret_zone,  # secret
+            np.full(
+                m, y * eta
+            ),  # erreur (eta instead of sigma to be sure that it print the solution, is not necessarily needed)
+            [y * round(sigma)],  # coefficient Kannan
+        ]
+    )
+
     return vec_bound, y
 
 
 def estimate_target_upper_bound_ternary(n, w, sigma, k, m):
     """
     Calcule une borne supérieure sur la norme du vecteur cible.
-    
+
     - On utilise ceil(sigma) pour majorer les composantes d'erreur.
     """
     # Calcul de nu
     nu = sigma * sqrt((n - k) / (w))
     # Approximation rationnelle nu
     x, y = approx_nu(nu)
-    
+
     # Construction du vecteur de borne
-    vec_bound = np.concatenate([
-        np.full(w, x),      # secret
-        np.full(m, y * ceil(sigma)),      # erreur
-        [y * sigma]                 # coefficient Kannan
-    ])
-    
+    vec_bound = np.concatenate(
+        [
+            np.full(w, x),  # secret
+            np.full(m, y * ceil(sigma)),  # erreur
+            [y * sigma],  # coefficient Kannan
+        ]
+    )
+
     # Borne supérieure de la norme (but i fact this can be less because it's approx by the sigma error and a exact norm value of x)
-    #so math.ceil(sigma) for be sure
+    # so math.ceil(sigma) for be sure
     bound_sup = np.linalg.norm(vec_bound)
     return bound_sup
+
 
 def estimate_target_upper_bound_ternary_vec(n, w, sigma, k, m, q):
     """
@@ -221,8 +261,8 @@ def estimate_target_upper_bound_ternary_vec(n, w, sigma, k, m, q):
     """
     # 1) Calcul de nu et approximation rationnelle
     nu = sigma * sqrt((n - k) / w)
-    if q >= 2: # just round for don't increase the numerical instability by scaling
-        x,y = round(nu), 1
+    if q >= 2:  # just round for don't increase the numerical instability by scaling
+        x, y = round(nu), 1
     else:
         x, y = approx_nu(nu)
 
@@ -242,63 +282,89 @@ def estimate_target_upper_bound_ternary_vec(n, w, sigma, k, m, q):
     vec_bound = np.concatenate([secret_zone, error_part, kannan_coeff])
     return vec_bound, y
 
-def BaiGalCenteredScaledBinomial(n: int, q: int, w: int, sigma: float, lwe: Tuple, eta:int, k: int, m: int, columns_to_keep: List[int]):
+
+def BaiGalCenteredScaledBinomial(
+    n: int,
+    q: int,
+    w: int,
+    sigma: float,
+    lwe: Tuple,
+    eta: int,
+    k: int,
+    m: int,
+    columns_to_keep: List[int],
+):
     # [ 0, (y * q) I_m, 0 // -x I_{n-k} ,  y A2^t, 0 // 0, y (b - A2 (t One))^t, y]
     A, b, __s, __e = lwe
     kannan_coeff = QQ(round(sigma))
 
     # keep given columns, first m rows, drop the rest
-    assert (n - k == len(columns_to_keep))
-    A2 = matrix(QQ, [[A[row][col] for col in columns_to_keep]
-                for row in range(m)])
+    assert n - k == len(columns_to_keep)
+    A2 = matrix(QQ, [[A[row][col] for col in columns_to_keep] for row in range(m)])
     b2 = vector(QQ, b[:m])
     __s2 = vector(ZZ, [__s[col] for col in columns_to_keep])
 
     # shift vector
-    t = ZZ(w)/ZZ(n-k)
-    stddev_secret = 1/(sqrt(1 - sqrt(2/(pi*eta))))
+    t = ZZ(w) / ZZ(n - k)
+    stddev_secret = 1 / (sqrt(1 - sqrt(2 / (pi * eta))))
     nu = sigma * sqrt((n - k) / (w * stddev_secret))
 
     # DON'T shift vector <-------------
     t = ZZ(0)
     # nu = sigma * sqrt((n-k)/w)
-    t_vec = vector(QQ, [t for _ in range(n-k)])
+    t_vec = vector(QQ, [t for _ in range(n - k)])
 
     # approximate scaling factor as rational
-    if q >= 2: # just round for don't increase the numerical instability by scaling
-        x,y = round(nu), 1
+    if q >= 2:  # just round for don't increase the numerical instability by scaling
+        x, y = round(nu), 1
     else:
         x, y = approx_nu(nu)
-    nu = ZZ(x)/ZZ(y)
-    #print("nu in BaiGal: ", nu)
+    nu = ZZ(x) / ZZ(y)
+    # print("nu in BaiGal: ", nu)
 
     # build basis
-    top_rows = zero_matrix(m, n-k).augment(q * identity_matrix(m)).augment(zero_matrix(m, 1))
-    mid_rows = (-nu * identity_matrix(n-k)).augment(A2.transpose()
-                                                    ).augment(zero_matrix(n-k, 1))
-    bot_rows = zero_matrix(QQ, 1, n-k).augment(matrix(QQ, b2 -
-                                                      A2 * t_vec)).augment(kannan_coeff * identity_matrix(1))
+    top_rows = (
+        zero_matrix(m, n - k).augment(q * identity_matrix(m)).augment(zero_matrix(m, 1))
+    )
+    mid_rows = (
+        (-nu * identity_matrix(n - k))
+        .augment(A2.transpose())
+        .augment(zero_matrix(n - k, 1))
+    )
+    bot_rows = (
+        zero_matrix(QQ, 1, n - k)
+        .augment(matrix(QQ, b2 - A2 * t_vec))
+        .augment(kannan_coeff * identity_matrix(1))
+    )
     basis = top_rows.stack(mid_rows).stack(bot_rows)
     basis = matrix(ZZ, t.denominator() * y * basis)
 
     # print("target = y (n-k) * [nu (s - t One) || e || round(sigma)]")
-    target = balance(vector(ZZ, t.denominator() * y * vector(QQ, list(nu *
-                     (__s2 - t_vec)) + list(__e[:m]) + [kannan_coeff])), q=t.denominator() * y * q)
-    return basis[:-1],basis[-1], target
+    target = balance(
+        vector(
+            ZZ,
+            t.denominator()
+            * y
+            * vector(QQ, list(nu * (__s2 - t_vec)) + list(__e[:m]) + [kannan_coeff]),
+        ),
+        q=t.denominator() * y * q,
+    )
+    return basis[:-1], basis[-1], target
 
 
 def hamming_weight(vec):
     return sum(1 for x in vec if x != 0)
 
+
 def BaiGalModuleLWE(
-    n: int,         # degré cyclotomique de base
+    n: int,  # degré cyclotomique de base
     q: int,
-    w: int,         # Hamming weight target
+    w: int,  # Hamming weight target
     M: int,
-    eta:int,
+    eta: int,
     module_lwe: tuple,  # (A_list, B_list, S_list, E_list, f)
-    target_k: int,      # nombre de coord du secret à RECUPERER
-    columns_to_keep: list[int]
+    target_k: int,  # nombre de coord du secret à RECUPERER
+    columns_to_keep: list[int],
 ):
     """
     wrapper for Module-LWE with Bai-Gal
@@ -308,7 +374,7 @@ def BaiGalModuleLWE(
     # 2) dimension totale
     N = len(s_eq)
     # M = round(7*len(b_eq)/8)
-    sigma = sqrt(eta/2) # var of error
+    sigma = sqrt(eta / 2)  # var of error
 
     s_eq = balance(vector(Zmod(q), s_eq.tolist()), q)
 
@@ -316,15 +382,15 @@ def BaiGalModuleLWE(
     # print("hamming weight of it:", hamming_weight(s_eq))
     # print("n, q, w, sigma,k, m, eta =",N, q,w,sigma,target_k,M,2)
     basis, b_vec, target = BaiGalCenteredScaledBinomial(
-        n = N,
-        q = q,
-        w = w,
-        sigma = sigma,
-        lwe   = (A_eq, b_eq, s_eq, e_eq),
-        eta = eta,
-        k     = target_k,
-        m     = M,
-        columns_to_keep = columns_to_keep
+        n=N,
+        q=q,
+        w=w,
+        sigma=sigma,
+        lwe=(A_eq, b_eq, s_eq, e_eq),
+        eta=eta,
+        k=target_k,
+        m=M,
+        columns_to_keep=columns_to_keep,
     )
     # print("beta needed:", exact_norm_det_and_beta(N, q,w,sigma,target_k,M,2, basis.nrows())) # 2 is eta
     # target_delta = (compute_delta_target(N, q,w,sigma,target_k,M,2))
@@ -333,7 +399,8 @@ def BaiGalModuleLWE(
     # print("over iterations", iterations_needed(N, target_k, w, 1))
     # _,k,_,beta,_,_,_ = (optimize_k_dynamic_beta(N, w, M,q, sigma, 2))
     # print(k,beta)
-    return basis,b_vec,target
+    return basis, b_vec, target
+
 
 # def qary_embedding(n: int, q: int, m: int, k: int = 0, sigma: float = 3.2):
 #     # creates a Bai-Galbraith embedding for m samples from the "uniform" distribution in the Decision-LWE game

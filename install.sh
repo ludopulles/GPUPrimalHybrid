@@ -45,7 +45,7 @@ popd >/dev/null
 # Build G6K-GPU-Tensor
 echo "Building G6K-GPU-Tensor..."
 pushd G6K-GPU-Tensor >/dev/null
-./rebuild.sh -y
+./rebuild.sh -f -y
 popd >/dev/null
 
 echo "All done! Your environment is ready and repositories are cloned and installed."
