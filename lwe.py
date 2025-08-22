@@ -148,11 +148,10 @@ def flatten_module_LWE(
 
     return A_eq, b_eq, s_eq, e_eq
 
-def CreateLWEInstance(n, log_q, m, w, lwe_sigma, type_of_secret='ternary', eta = None, k_dim=None):
+def CreateLWEInstance(n, q, m, w, lwe_sigma, type_of_secret='ternary', eta = None, k_dim=None):
     """
     Create an LWE instance with the given parameters.
     """
-    q = 2 ** log_q
     set_random_seed(0)
     if type_of_secret == 'ternary':
         return SpTerLWE(n, m, q, w, err_std=lwe_sigma)
