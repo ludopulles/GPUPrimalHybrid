@@ -1,16 +1,16 @@
 # LWE Attack Implementation
 
-This repository contains an implementation of a primal attack against the Learning with Errors (LWE) cryptographic primitive, using lattice reduction techniques and GPU acceleration.
+This repository contains an implementation of a primal attack against the Learning with Errors (LWE) with sparse secrets (binomial or ternary), using GPU acceleration.
 
 Mainly usage of:
 
-- cuBLASter: BLASter reduction adapted for GPUs
+- cuBLASter: BLASter implementation adapted for GPUs
 - G6K-GPU-Tensor: GPU-accelerated lattice reduction and SVP solvers
 - lattice-estimator: for estimating the cost and the choice of parameters for the lattice attacks
 
 ## Overview
 
-The attack implements a hybrid primal attack against LWE instances with different secret distributions (ternary and binomial). It leverages BKZ lattice reduction and supports multi-GPU parallelization for efficient computation.
+The attack implements a hybrid primal attack against LWE instances with different sparse secret distributions (ternary and binomial). It supports multi-GPU parallelization for efficient computation.
 
 ## Prerequisites
 
@@ -19,6 +19,8 @@ The attack implements a hybrid primal attack against LWE instances with differen
 - Conda, mamba, or a similar environment manager (conda recommended for the use of install.sh)
 
 ## Installation
+
+1. Install conda if you haven't already. You can install it from [here](https://www.anaconda.com/docs/getting-started/miniconda/install).
 
 1. Clone the repository:
 
@@ -31,32 +33,31 @@ The attack implements a hybrid primal attack against LWE instances with differen
 
 ## Main Components
 
-attack.py: Contains the main logic for the primal attack, including LWE instance creation, lattice embedding, reduction, and Babai's algorithm. It contains all functions for single-threaded execution (used for testing parameters, avoid using it for benchmarking).
+attack_testing.py: Contains the main logic for the primal attack, including LWE instance creation, lattice embedding, reduction, SVP, and Babai's algorithm. It contains all functions for single-threaded execution (used for testing parameters, avoid using it for benchmarking).
 
-attack_multithread.py: Implements multi-GPU parallelization, distributing the workload across available GPUs and managing worker processes. Use this for actual attacks. (see Usage section below for details)
+attack_for_benchmark.py: Implements multi-GPU parallelization, distributing the workload across available GPUs and managing worker processes. Use this for actual attacks. (see Usage section below for details)
+His code is also more clean and easier to read than attack_testing.py because it does not contain all the testing code.
 
-attack_params.py: Contains a list of parameter sets for different LWE instances to be attacked.
+attack_params.py: Contains a list of parameter sets for different LWE instances to be attacked. You can modify this file to add or change the parameters for your specific use cases.
 
 ## Usage Details
 
-Set the numbers of workers and chunk size in attack_multithread.py according to your hardware capabilities.
+Set the numbers of workers and chunk size in attack_for_benchmark.py according to your hardware capabilities.
 
 - `num_workers`: Number of parallel workers (ideally a multiple of the number of GPUs and CPU cores, but may be limited by GPUs VRAM)
-- `chunk_size`: Number of iterations per worker before checking for a solution (larger chunks reduce overhead but may lead to imbalanced workloads)
+- `chunk_size`: Number of iterations per worker before checking for a solution (larger chunks reduce overhead it just takes more time to estimate the time remaining)
 - `GUESS_BATCH`: Number of batches to process in each guess (affects GPUs memory usage and performance)
-
-Adjust the parameters in attack_params.py to specify the LWE instances you want to attack.
 
 ### Lattice Embedding
 
 For the primal attack, the system creates lattice embeddings using either:
 
 - `BaiGalCenteredScaledTernary`: For ternary secrets with Gaussian errors
-- `BaiGalModuleLWE`: For module-LWE with binomial secrets
+- `BaiGalModuleLWE`: For module-LWE with binomial secrets (and binomial errors)
 
-The ternary secrets embedding and ternary LWE instance creation are taken from the [Cool+Cruel=Dual](
+The embedding and ternary LWE instance creation are taken from the [Cool+Cruel=Dual](
     https://gitlab.com/fvirdia/cool-plus-cruel-equals-dual
-) repository.
+) repository. We also more generally adopted their file naming conventions, as this code is based on theirs. Many thanks to the authors.
 
 ### GPU-Accelerated Babai's Algorithm
 
@@ -79,7 +80,7 @@ result, time_taken = svp_babai_fp64_nr_projected(
 )
 ```
 
-See svp_babai_fp64_nr_projected in attack_multithread.py for more details on the parameters and how they are used.
+See svp_babai_fp64_nr_projected in attack_for_benchmark.py for more details on the parameters and how they are used.
 See also kernel_babai.py for the implementation of the Babai's Nearest Plane algorithm on the GPU. (This is a GPU version base on BLASter batched Babai's Nearest Plane algorithm)
 
 ### Result Handling
@@ -93,11 +94,11 @@ The results of the attack are collected and saved in a CSV file, including:
 - `secret_type`: Type of secret distribution (ternary or binomial)
 - `sigma`: Standard deviation for Gaussian errors (if applicable)
 - `eta`: Parameter for binomial secrets (if applicable)
-- `available_cores`: Number of available CPU cores
+- `available_cores`: Number of available CPU cores (for reference)
 - `success`: Whether the attack was successful
 - `iterations_used`: Number of iterations taken to find a solution
 - `time_elapsed`: Total time taken for the attack
-- `estimated_time`: Estimated time based on average time per iteration and expected iterations (this is an estimate and may not reflect actual time taken, especially if the attack is unsuccessful, only used in attack.py, not in attack_multithread.py)
+- `estimated_time`: Estimated time based on average time per iteration and expected iterations (this is an estimate and may not reflect actual time taken, especially if the attack is unsuccessful, only used in attack_testing.py)
 - `error`: Any error encountered during the attack (if applicable)
 
 ## Usage
@@ -105,7 +106,7 @@ The results of the attack are collected and saved in a CSV file, including:
 To run the attack, execute the following command:
 
 ```bash
-python attack_multithread.py
+python attack_for_benchmark.py
 ```
 
 And optionally specify the number of workers and chunk size in the script.
@@ -119,4 +120,4 @@ The `atk_params` should contain a list of parameter dictionaries, each specifyin
 - `lwe_sigma`: For Gaussian errors (ternary secrets)
 - `eta`: For binomial secrets
 - `k_dim`: For module-LWE
-- Optionally: `beta`, `eta_svp`, `m`, `k`, `h_` to override automatic parameter selection
+- Optionally: `beta`, `eta_svp`, `m`, `k`, `h_` to override automatic parameter selection.

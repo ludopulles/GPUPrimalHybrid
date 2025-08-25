@@ -8,7 +8,6 @@ from sage.all import (
     vector,
     sample,
     IntegerModRing,
-    set_random_seed,
 )  # type: ignore #noqa
 from sage.crypto.lwe import DiscreteGaussianDistributionPolynomialSampler as DRGauss  # type: ignore #noqa
 from sage.crypto.lwe import DiscreteGaussianDistributionIntegerSampler as DGauss  # type: ignore #noqa
@@ -151,7 +150,7 @@ def CreateLWEInstance(
     """
     Create an LWE instance with the given parameters.
     """
-    set_random_seed(0)
+    # set_random_seed(0) for testing, not for real benchmarks
     if type_of_secret == "ternary":
         return SpTerLWE(n, m, q, w, err_std=lwe_sigma)
     elif type_of_secret == "binomial":
