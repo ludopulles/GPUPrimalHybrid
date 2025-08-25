@@ -5,7 +5,7 @@ This repository contains an implementation of a primal attack against the Learni
 Mainly usage of:
 
 - cuBLASter: BLASter implementation adapted for GPUs
-- G6K-GPU-Tensor: GPU-accelerated lattice reduction and SVP solvers
+- G6K-GPU-Tensor: GPU-accelerated sieving algorithms
 - lattice-estimator: for estimating the cost and the choice of parameters for the lattice attacks
 
 ## Overview
