@@ -33,12 +33,12 @@ The attack implements a hybrid primal attack against LWE instances with differen
 
 ## Main Components
 
-attack_testing.py: Contains the main logic for the primal attack, including LWE instance creation, lattice embedding, reduction, SVP, and Babai's algorithm. It contains all functions for single-threaded execution (used for testing parameters, avoid using it for benchmarking).
+``attack_testing.py``: Contains the main logic for the primal attack, including LWE instance creation, lattice embedding, reduction, SVP, and Babai's algorithm. It contains all functions for single-threaded execution (used for testing parameters, avoid using it for benchmarking).
 
-attack_for_benchmark.py: Implements multi-GPU parallelization, distributing the workload across available GPUs and managing worker processes. Use this for actual attacks. (see Usage section below for details)
+``attack_for_benchmark.py``: Implements multi-GPU parallelization, distributing the workload across available GPUs and managing worker processes. Use this for actual attacks. (see Usage section below for details)
 His code is also more clean and easier to read than attack_testing.py because it does not contain all the testing code.
 
-attack_params.py: Contains a list of parameter sets for different LWE instances to be attacked. You can modify this file to add or change the parameters for your specific use cases.
+``attack_params.py``: Contains a list of parameter sets for different LWE instances to be attacked. You can modify this file to add or change the parameters for your specific use cases.
 
 ## Usage Details
 
@@ -61,27 +61,9 @@ The embedding and ternary LWE instance creation are taken from the [Cool+Cruel=D
 
 ### GPU-Accelerated Babai's Algorithm
 
-For more efficient solving, the system uses a GPU-accelerated implementation of Babai's nearest plane algorithm:
-
-```python
-result, time_taken = svp_babai_fp64_nr_projected(
-    basis,
-    eta,
-    columns_to_keep,
-    A,
-    b_vec,
-    tau,
-    n,
-    k,
-    m,
-    secret_possible_values,
-    search_space_dim,
-    target_estimation
-)
-```
-
-See svp_babai_fp64_nr_projected in attack_for_benchmark.py for more details on the parameters and how they are used.
-See also kernel_babai.py for the implementation of the Babai's Nearest Plane algorithm on the GPU. (This is a GPU version base on BLASter batched Babai's Nearest Plane algorithm)
+For more efficient solving, the system uses a GPU-accelerated implementation of Babai's nearest plane algorithm.
+See ``svp_babai_fp64_nr_projected`` in ``attack_for_benchmark.py`` for more details on the parameters and how they are used.
+See also ``kernel_babai.py`` for the implementation of the Babai's Nearest Plane algorithm on the GPU. (This is a GPU version base on BLASter batched Babai's Nearest Plane algorithm)
 
 ### Result Handling
 
