@@ -1,8 +1,30 @@
 # The values here are set for ternary attack on n=1024, q=2^26, w=12, it can be applied to other params by just editing cores, and num_workers
 # for the n=512, q= 3329, w=11, we can set cores=1, num_workers=(number of cores of the machine) (keep in mind that the machine need to have enough GPU also)
 
+import argparse
+import csv
 import math
+import numpy as np
+import os
+import psutil
+import sys
+import time
+import traceback
 
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from itertools import combinations, product
+from multiprocessing import Manager, get_context
+from pathlib import Path
+from tqdm import tqdm
+
+# Local imports
+from blaster import reduce, get_profile
+from estimator import LWE, ND
+
+from fpylll.util import gaussian_heuristic
+from fpylll import IntegerMatrix, CVP
+
+# In this directory
 from lwe import CreateLWEInstance
 from instances import (
     BaiGalCenteredScaledTernary,
@@ -11,33 +33,6 @@ from instances import (
     estimate_target_upper_bound_binomial_vec,
 )
 
-
-import multiprocessing as mp
-from multiprocessing import Manager
-from concurrent.futures import ProcessPoolExecutor, as_completed
-
-
-from pathlib import Path
-import sys
-
-import psutil
-import os
-import numpy as np
-import time
-import csv
-import traceback
-
-from blaster import reduce
-from blaster import get_profile
-from estimator import LWE, ND
-
-from fpylll.util import gaussian_heuristic
-
-from fpylll import IntegerMatrix, CVP
-
-
-from itertools import combinations, product
-from tqdm import tqdm
 
 
 def reduction(
@@ -497,7 +492,7 @@ def drop_and_solve(lwe, params, iteration):
         elif params["secret_type"] == "ternary":
             secret_non_zero_coefficients_possible = [-1, 1]
         else:
-            raise (" Incorrect secret type")
+            raise ("Incorrect secret type")
     _seed = int.from_bytes(os.urandom(4))
     if "k_dim" in params:
         columns_to_keep = pick_columns_fast(lwe, params, _seed)
@@ -758,7 +753,7 @@ def parallel_run(
     if result_init is None:
         result_init = {"success": False, "iterations_used": 0}
 
-    ctx = mp.get_context("spawn")
+    ctx = get_context("spawn")
     num_gpus = _safe_num_gpus()
 
     # By default, one worker per GPU
@@ -824,7 +819,7 @@ def parallel_run(
     return final_result
 
 
-def run_single_attack(params, run_id):
+def run_single_attack(params, run_id, run_attack=True):
     result = {
         "run_id": run_id,
         "n": params["n"],
@@ -838,6 +833,7 @@ def run_single_attack(params, run_id):
         "time_elapsed": None,
         "error": None,
     }
+
     try:
         params = params.copy()
         if (
@@ -854,7 +850,8 @@ def run_single_attack(params, run_id):
             iterations = draws_for_confidence(N, params["k"], params["w"])
             iterations = 1
             params["search_space"] = 1
-            print("Iterations esperance :", expected_draws(N, params["k"], params["w"]))
+
+            print("E[Iterations]=", expected_draws(N, params["k"], params["w"]))
             print("Iterations (0.99 level) :", iterations)
         else:
             if params["secret_type"] == "binomial":
@@ -887,6 +884,9 @@ def run_single_attack(params, run_id):
             params["search_space"] = cost["|S|"]
             params["h_"] = cost["h_"]
             iterations = cost["repetitions"]
+        if not run_attack:
+            return
+
         lwe = primal_attack(params)
         cores = psutil.cpu_count(logical=False)
         result["available_cores"] = cores
@@ -903,7 +903,13 @@ def run_single_attack(params, run_id):
     return result
 
 
-def batch_attack(atk_params, repeats=1, output_csv="attack_results.csv"):
+def batch_attack(atk_params, output_csv, run_attack, repeats=1):
+    if not run_attack:
+        for params in atk_params:
+            for run_id in range(repeats):
+                run_single_attack(params, run_id, run_attack=False)
+        return
+
     fieldnames = [
         "run_id",
         "n",
@@ -919,15 +925,13 @@ def batch_attack(atk_params, repeats=1, output_csv="attack_results.csv"):
         "estimated_time",
         "error",
     ]
-    run_id = 0
 
     with open(output_csv, "w", newline="") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
 
         for params in atk_params:
-            for r in range(repeats):
-                run_id += 1
+            for run_id in range(repeats):
                 result = run_single_attack(params, run_id)
                 writer.writerow(result)
                 if result["time_elapsed"] is not None:
@@ -945,4 +949,14 @@ def batch_attack(atk_params, repeats=1, output_csv="attack_results.csv"):
 if __name__ == "__main__":
     from attack_params import atk_params
 
-    batch_attack(atk_params)
+    parser = argparse.ArgumentParser(
+        prog='GPU Primal Hybrid',
+        description='Attack LWE with sparse secrets'
+    )
+    parser.add_argument('--estimate', '-e', action='store_true', help='Only estimate; do not run the attacks')
+    parser.add_argument('--output', '-o', type=str, default='attack_results.csv', help='Output file')
+    parser.add_argument('--runs', '-r', type=int, default=1, help='Number of repetitions')
+
+    args = parser.parse_args()
+
+    batch_attack(atk_params, args.output, not args.estimate, args.runs)
