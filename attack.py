@@ -33,7 +33,7 @@ from estimation import find_attack_parameters, output_params_info, required_iter
 from instances import BaiGalCenteredScaledTernary, BaiGalModuleLWE, \
     estimate_target_upper_bound_ternary_vec, estimate_target_upper_bound_binomial_vec
 from kernel_babai import nearest_plane_gpu, __babai_ranges, _build_choose_table_dev, \
-    guess_batches_gpu, value_batches_fp32_gpu
+    guess_batches_gpu, value_batches_fp32_gpu, precompute_nearest_plane
 from lwe import generate_CBD_MLWE, generate_ternary_MLWE, MLWE_to_LWE, bai_galbraith_embedding, \
     select_samples
 
@@ -234,22 +234,21 @@ def svp_babai_fp64_nr_projected(
     A_guess_gpu = cp.asarray(A_guess, dtype=cp.float64)  # (m, k)
 
     # Decompose B = Q * R -> Q^T B = R.
-    Q_gpu, R_gpu = cp.linalg.qr(basis_gpu, mode="reduced")
-    # because before the part before babai_dim, b is all zeros, if not we need Q_gpu[:,-babai_dim:]
+    QT, R = cp.linalg.qr(basis_gpu, mode="reduced")
+    QT = QT.T
 
     # Execute Babai's Nearest Plane Algorithm using the last `babai_dim`
     # Gram--Schmidt vectors of the basis.
-
     babai_dim = m  # TODO: make this adjustable...
+
     # Select first `m` rows, because that's where b is nonzero.
     # Select last `babai_dim` columns, because that's where we perform Babai.
-    Q_gpu = (Q_gpu.T)[-babai_dim:, :m]  # note the transpose.
-    R_gpu = R_gpu[-babai_dim:, -babai_dim:]
+    QT_np = QT[-babai_dim:, :m]
+    R_np = R[-babai_dim:, -babai_dim:]
 
     # setup variables for Babai Nearest Plane:
-    babai_range = __babai_ranges(babai_dim)
-    diag = cp.ascontiguousarray(cp.diag(R_gpu))
-    inv_diag = cp.reciprocal(diag)
+    data = precompute_nearest_plane(R)
+    data_NP = precompute_nearest_plane(R_np)
 
     full_sqnorm, proj_sqnorm = 2 * e_stddev**2 * (m + n - k), 2 * e_stddev**2 * babai_dim
     full_norm, proj_norm = sqrt(full_sqnorm), sqrt(proj_sqnorm)
@@ -257,20 +256,17 @@ def svp_babai_fp64_nr_projected(
     # print(cp.rint(y0).astype(cp.int64))
     # print(cp.linalg.norm(y0))
 
-    # y0 = Q_gpu @ (cp.asarray(__As, dtype=cp.float64) + cp.asarray(__e, dtype=cp.float64))
-    y0 = Q_gpu @ b_gpu  # y0 = Q^T b
+    # y0 = QT_np @ (cp.asarray(__As, dtype=cp.float64) + cp.asarray(__e, dtype=cp.float64))
+    y0 = QT_np @ b_gpu  # y0 = Q^T b
     U = cp.empty_like(y0)
 
-    nearest_plane_gpu(R_gpu, y0[:, None], U[:, None], babai_range, diag, inv_diag)
+    nearest_plane_gpu(R_np, y0[:, None], U[:, None], *data_NP)
     if bool((cp.linalg.norm(y0) <= proj_norm).get()):
-        # call babai without float approximation:
+        # Call Babai using FPyLLL:
         t = np.concatenate((b_host, np.zeros(n - k), [1]))
         t = np.rint(t).astype(np.int64)
-
-        print("Firing up FPyLLL", flush=True)
         B = IntegerMatrix.from_matrix(basis)
         v = t - np.array(CVP.babai(B, t), dtype=np.int64)
-        print("Done with FPyLLL.", flush=True)
 
         # print(f"Babai solution: {v} of norm {np.linalg.norm(v)}")
         if np.linalg.norm(v) <= full_norm:
@@ -282,9 +278,6 @@ def svp_babai_fp64_nr_projected(
 
     choose_dev = _build_choose_table_dev(k, w_guess + 1)  # Table of (k choose i)'s (i <= w_guess)
     vals_dev = cp.asarray(secret_nonzero_support, dtype=cp.float32)
-
-    # correct_b = (cp.asarray(__As, dtype=cp.int64) + cp.asarray(__e, dtype=cp.int64)) % q
-    # print("correct target: ", correct_b)
 
     for guess_val in value_batches_fp32_gpu(vals_dev, w_guess, VALUE_BATCH):
         # Enumerate all possible values v_1, ... v_{w_guess} \in secret_nonzero_support.
@@ -306,9 +299,9 @@ def svp_babai_fp64_nr_projected(
             bs_gpu = cp.broadcast_to(b_gpu[:, None], (m, batch_size))
             bs_gpu = (bs_gpu - guess_batch) % q
 
-            Y = Q_gpu @ bs_gpu  # Q^T (b - A_g s_g)
+            Y = QT_np @ bs_gpu  # Q^T (b - A_g s_g)
             U = cp.empty((babai_dim, batch_size), dtype=cp.float64)
-            nearest_plane_gpu(R_gpu, Y, U, babai_range, diag, inv_diag)
+            nearest_plane_gpu(R_np, Y, U, *data_NP)
 
             ## TODO: remove
             #for bid in range(val_size):
@@ -339,10 +332,8 @@ def svp_babai_fp64_nr_projected(
                 t = np.concatenate((cp.asnumpy(bs_gpu[:, idx_t]), np.zeros(n-k), [1]))
                 t = np.rint(t).astype(np.int64)
 
-                print("Firing up FPyLLL", flush=True)
                 B = IntegerMatrix.from_matrix(basis)
                 v = t - np.array(CVP.babai(B, t), dtype=np.int64)
-                print("Done with FPyLLL.", flush=True)
                 # print('Possible candidate: ', v, np.linalg.norm(v), 'vs', full_norm)
                 if np.linalg.norm(v) <= full_norm:
                     # TODO: also return s_guess
@@ -350,18 +341,10 @@ def svp_babai_fp64_nr_projected(
 
                 # if CVP babai didn't find it give the right one, do it on the whole basis directly
                 # try on whole basis
-                # fix not same name for avoid R_gpu error in the loop after this test (if it's not the right one)
-                Q_gpu_test, R_gpu_test = cp.linalg.qr(basis_gpu, mode="reduced")
-                y = Q_gpu_test.T @ cp.asarray(t)
+                # fix not same name for avoid R_np error in the loop after this test (if it's not the right one)
+                y = QT @ cp.asarray(t)
                 U = cp.empty_like(y)
-                diag = cp.ascontiguousarray(cp.diag(R_gpu_test))
-                nearest_plane_gpu(
-                    R_gpu_test,
-                    y[:, None],
-                    U[:, None],
-                    __babai_ranges(basis_gpu.shape[0]),
-                    diag, 1.0 / diag,
-                )
+                nearest_plane_gpu(R, y[:, None], U[:, None], *data)
                 v = t + cp.asnumpy(basis_gpu @ U)
                 v = (np.rint(v)).astype(np.int64)
                 if np.linalg.norm(v) <= full_norm:
@@ -438,6 +421,21 @@ def drop_and_solve(lwe, params, iteration):
 
     # In this iteration, randomly select `k` columns to drop:
     columns_dropped, columns_to_keep = pick_columns(N, k, _seed=iteration)
+    A, __b, __s, __e = lwe
+
+    # DEBUGGING PART (MAKES USE OF SECRET):
+    # TODO: remove this code section
+    __s_guess = np.array(__s, dtype=np.int64)[columns_dropped]
+    #__s_lat = np.array(__s, dtype=np.int64)[columns_to_keep]
+    if np.count_nonzero(__s_guess) == w_guess:
+        # print(f"Correct secret guess: {__s_guess}")
+        print(f"Iteration #{iteration}: must succeed!", flush=True)
+        print(f"s_guess =  {__s_guess[np.nonzero(__s_guess)]} at {np.nonzero(__s_guess)[0]}", flush=True)
+    # else:
+        # return False
+        #print(f"Iteration #{iteration}: will fail.", flush=True)
+        # return 1, 2  # fake result
+    del(__s_guess)  # END OF DEBUGGING PART
 
     if is_binomial:
         e_stddev = sqrt(eta/2)
@@ -475,31 +473,13 @@ def drop_and_solve(lwe, params, iteration):
         # basis = basis.delete_columns([basis.ncols() - 1])
 
         reduced_basis, _ = BKZ_reduce(basis, beta)
-        A, __b, __s, __e = lwe
-
-        # DEBUGGING PART (MAKES USE OF SECRET):
-        # TODO: remove this code section
-        __s_guess = np.array(__s, dtype=np.int64)[columns_dropped]
-        #__s_lat = np.array(__s, dtype=np.int64)[columns_to_keep]
-        if np.count_nonzero(__s_guess) == w_guess:
-            print(f"Correct secret guess: {__s_guess}")
-            print(f"Iter #{iteration}: must succeed!", flush=True)
-            print(f"s_guess =  {__s_guess[np.nonzero(__s_guess)]} at {list(np.nonzero(__s_guess))}", flush=True)
-
-            # A_lat = np.array(A, dtype=np.int64).T[:, columns_to_keep]
-            # __As = (A_lat @ __s_lat) % q
-            # print(f"A_L s_L = {__As}")
-        else:
-            print(f"Iter #{iteration}: will fail.", flush=True)
-            # return 1, 2  # fake result
-        #del(__s_guess)  # END OF DEBUGGING PART
 
         if eta_svp == 2:
             # Guess where the nonzero entries in s_{guess} are, and
             # check whether the corresponding target b - A_g s_g is a BDD instance using Babai NP.
             target = svp_babai_fp64_nr_projected(
                 reduced_basis, eta_svp, columns_dropped, columns_to_keep, A, b_vec, N,
-                k, m, q, secret_nonzero_support, w_guess, e_stddev,
+                k, m, q, secret_nonzero_support, w_guess, e_stddev
             )
         else:
             # reappend with the tau to call the svp (not for babai)

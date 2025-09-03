@@ -25,7 +25,7 @@ def type_ternary(lwe_sigma=3.19):
 
 atk_params = [
     # Binomial
-    type_binomial(2, 2) | {'n': 256, 'q':        3329, 'w': 11, 'beta': 50, 'eta_svp': 2, 'm': 200, 'k': 350, 'h_': 2},
+    type_binomial(2, 2) | {'n': 256, 'q':        3329, 'w': 11, 'beta': 40, 'eta_svp': 2, 'm': 200, 'k': 350, 'h_': 2},
     #, 'eta_svp':52, 'k':372, 'm':289,'beta':53},
     #type_binomial(2, 2) | {'n': 256, 'q':   179067461, 'w': 25},
     #type_binomial(2, 3) | {'n': 256, 'q': 34088624597, 'w': 19},

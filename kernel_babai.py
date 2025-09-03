@@ -298,6 +298,13 @@ axpy_scalar_row = cp.ElementwiseKernel(
 )
 
 
+def precompute_nearest_plane(R):
+    _ranges = __babai_ranges(R.shape[0])
+    diag = cp.ascontiguousarray(cp.diag(R))
+    inv_diag = cp.reciprocal(diag)
+    return _ranges, diag, inv_diag
+
+
 def nearest_plane_gpu(R, T, U, range_around, diag, inv_diag):
     """
     In-place Babai nearest plane on GPU.
