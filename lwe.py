@@ -1,164 +1,185 @@
 import numpy as np
-from sage.all import (
-    PolynomialRing,
-    ZZ,
-    Zmod,
-    randint,
-    matrix,
-    vector,
-    sample,
-    IntegerModRing,
-)  # type: ignore #noqa
+from sage.all import PolynomialRing, QuotientRing, ZZ, Zmod, randint, matrix, vector, sample  # type: ignore #noqa
+from sage.all import zero_matrix as mat0, identity_matrix as id_mat
 from sage.crypto.lwe import DiscreteGaussianDistributionPolynomialSampler as DRGauss  # type: ignore #noqa
 from sage.crypto.lwe import DiscreteGaussianDistributionIntegerSampler as DGauss  # type: ignore #noqa
 
-# def fixed_secret_lwe(
-#     n: int,
-#     m: int,
-#     q: int,
-#     s: np.ndarray,
-#     err_std: float = 3.2,
-#     seed: int = None
-# ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-#     """
-#     Generate an LWE instance with a fixed secret using NumPy.
-
-#     Parameters:
-#         n (int): Dimension of the secret vector.
-#         m (int): Number of LWE samples.
-#         q (int): Modulus for arithmetic in Z_q.
-#         s (np.ndarray): Secret vector of shape (n,) with entries in Z_q.
-#         err_std (float): Standard deviation for Gaussian error.
-#         seed (int): Optional random seed for reproducibility.
-
-#     Returns:
-#         A (np.ndarray): m x n matrix over Z_q.
-#         b (np.ndarray): m-dimensional vector over Z_q, computed as (A @ s + e) mod q.
-#         s (np.ndarray): The secret vector (unchanged).
-#         e (np.ndarray): Discrete Gaussian error vector of length m (integers).
-#     """
-#     # Optional seed for reproducibility
-#     if seed is not None:
-#         np.random.seed(seed)
-
-#     # Sample A uniformly from Z_q^{m x n}
-#     A = np.random.randint(low=0, high=q, size=(m, n), dtype=int)
-
-#     # Sample continuous Gaussian and round to nearest integer for discrete error
-#     e_cont = np.random.normal(loc=0.0, scale=err_std, size=m)
-#     e = np.rint(e_cont).astype(int)
-
-#     # Compute LWE samples: b = A s + e (mod q)
-#     b = (A.dot(s) + e) % q
-
-#     return A, b, s, e
+# Local import
+from utilities import balance, round_down
 
 
-def fixed_secret_LWE(n: int, m: int, q: int, s, err_std: float = 3.2):
-    Zq = Zmod(q)
-    A = matrix(Zq, [[Zq.random_element() for col in range(n)] for row in range(m)])
-    err_distr = DGauss(err_std)
-    e = vector(ZZ, [err_distr() for _ in range(m)])
-    b = (A * s + e) % q  # mod q should be unnecessary
-    return (A.numpy(), b.numpy(), s.numpy(), e.numpy())
-
-
-def SpTerLWE(n: int, m: int, q: int, hw: int, err_std: float = 3.2):
-    assert hw >= 0
-    # print(n, hw)
-    indices = sample(list(range(n)), hw)
-    # sample sa ternary secret where only `indices` contain +/- 1s
-    s = vector(ZZ, [sample([-1, 1], 1)[0] if ind in indices else 0 for ind in range(n)])
-    return fixed_secret_LWE(n, m, q, s, err_std=err_std)
-
-
-def hamming_weight_fix_CBD_MLWE(n: int, q: int, k: int, m: int, eta: int, hw: int):
-    # Anneau cyclotomique R_q = (Z/qZ)[x]/(x^n+1)
-    Rq = PolynomialRing(IntegerModRing(q), "x")
-    x = Rq.gen()
-    Rq = Rq.quotient(x**n + 1)
-
+def sparse_cbd(Rq: QuotientRing, n: int, rk: int, eta: int, hw: int = None):
     # centered binomial sampler
     def cbd():
         return sum(randint(0, 1) - randint(0, 1) for _ in range(eta))
 
-    # Secret ternaire de Hamming-weight = hw
-    global_idx = sample(range(k * n), hw)
+    def nonzero_cbd():
+        v = cbd()
+        while v == 0:
+            v = cbd()
+        return v
 
-    # 2) on construit une « liste plate » de coefficients de longueur k*n
-    flat = [0] * (k * n)
-    for idx in global_idx:
-        # on resample CBD tant que c'est 0
-        val = 0
-        while val == 0:
-            val = sum(randint(0, 1) - randint(0, 1) for _ in range(eta))
-        flat[idx] = val
-
-    # 3) on reforme k listes de taille n
-    S = []
-    for j in range(k):
-        coeffs = flat[j * n : (j + 1) * n]
-        S.append(Rq(coeffs))
-
-    # Génération de m échantillons
-    A = [[Rq.random_element(degree=n - 1) for _ in range(k)] for __ in range(m)]
-    E = [Rq([cbd() for _ in range(n)]) for _ in range(m)]
-    B = [sum(A[i][j] * S[j] for j in range(k)) + E[i] for i in range(m)]
-
-    return A, B, S, E
-
-
-def flatten_module_LWE(
-    A_list, B_list, S_list, E_list, n: int, k: int, q: int, m_samples: int = None
-):
-    m_old = len(A_list)
-    m = m_old if m_samples is None else min(m_samples, m_old)
-    M, N = m * n, k * n
-
-    A_eq = np.zeros((M, N), dtype=int)
-    b_eq = np.zeros(M, dtype=int)
-    e_eq = np.zeros(M, dtype=int)
-
-    for i in range(m):
-        for t in range(n):
-            row = i * n + t
-            b_eq[row] = int(B_list[i][t]) % q
-            e_eq[row] = int(E_list[i][t]) % q
-            for j in range(k):
-                poly = A_list[i][j]
-                for u in range(n):
-                    col = j * n + u
-                    idx = (t - u) % n
-                    sign = 1 if t >= u else -1  # cyclic with -1 (rot matrix)
-                    A_eq[row, col] = (sign * int(poly[idx])) % q
-
-    s_eq = np.zeros(N, dtype=int)
-    for j in range(k):
-        for u in range(n):
-            s_eq[j * n + u] = int(S_list[j][u]) % q
-    pred = (A_eq.dot(s_eq) + e_eq) % q
-    assert np.array_equal(pred, b_eq), (
-        f"Erreur de flatten : b_eq != A_eq @ s_eq + e_eq mod {q}"
-    )
-
-    return A_eq, b_eq, s_eq, e_eq
-
-
-def CreateLWEInstance(
-    n, q, m, w, lwe_sigma, type_of_secret="ternary", eta=None, k_dim=None
-):
-    """
-    Create an LWE instance with the given parameters.
-    """
-    # set_random_seed(0) for testing, not for real benchmarks
-    if type_of_secret == "ternary":
-        return SpTerLWE(n, m, q, w, err_std=lwe_sigma)
-    elif type_of_secret == "binomial":
-        if not eta:
-            raise ValueError("eta need to be defined")
-        # only module k = 2 here
-        A2, B2, S2, E2 = hamming_weight_fix_CBD_MLWE(n, q, k_dim, k_dim + 2, eta, w)
-
-        return flatten_module_LWE(A2, B2, S2, E2, n, k_dim, q, k_dim + 2)
+    N = n * rk  # unstructured dimension
+    if hw is None:
+        x = [cbd() for _ in range(N)]  # Plain Centered Binomial Distribution
     else:
-        raise ValueError(f"Unsupported secret type: {type_of_secret}")
+        indices = sample(list(range(N)), hw)  # Pick 'hw' indices, and make the rest zero.
+        x = [nonzero_cbd() if i in indices else 0 for i in range(N)]
+    return vector(Rq, [Rq(x[n * i:n * (i + 1)]) for i in range(rk)])
+
+
+def sparse_ternary(Rq: QuotientRing, n: int, rk: int, hw: int):
+    def ternary():  # Ternary sampler
+        return [-1, 1][randint(0, 1)]
+
+    N = n * rk  # unstructured dimension
+    assert hw is not None
+    indices = sample(list(range(N)), hw)  # Pick 'hw' indices, and make the rest zero.
+
+    x = [ternary() if i in indices else 0 for i in range(N)]
+    return vector(Rq, [Rq(x[n * i:n * (i + 1)]) for i in range(rk)])
+
+
+def generate_MLWE(Rq: QuotientRing, n: int, rk: int, s: vector, e):
+    """
+    Generate a Module-LWE instance of rank `rk` using a cyclotomic ring of
+    conductor `n`, modulus `q`, and fixed secret `s`, and fixed error `e`.
+
+    :return: tuple (A, b, s, e) such that b = s*A + e (mod q), using row notation
+    """
+    A = vector(Rq, [Rq.random_element() for _ in range(rk)])
+    b = A.dot_product(s) + e  # modulo q
+    return A, b, s, e
+
+
+def generate_CBD_MLWE(n: int, rk: int, q: int, hw: int, eta: int):
+    """
+    Sample an instance with a sparse, centered binomial secret, and a centered binomial error
+    """
+    Rq, X = PolynomialRing(Zmod(q), 'x').objgen()
+    Rq, X = Rq.quotient(X**n + 1).objgen()
+
+    s = sparse_cbd(Rq, n, rk, eta, hw)
+    e = sparse_cbd(Rq, n, 1, eta)[0]
+
+    return generate_MLWE(Rq, n, rk, s, e)
+
+
+def generate_ternary_MLWE(n: int, rk: int, q: int, hw: int, e_stddev: float):
+    """
+    Sample an instance with a sparse, ternary secret, and a discrete gaussian error
+    """
+    Rq, X = PolynomialRing(Zmod(q), 'x').objgen()
+    Rq, X = Rq.quotient(X**n + 1).objgen()
+
+    s = sparse_ternary(Rq, n, rk, hw)
+    e = DRGauss(Rq, n, e_stddev)()
+
+    return generate_MLWE(Rq, n, rk, s, e)
+
+
+# Reductions from 'Module LWE' to 'plain LWE'
+
+
+def coeff(x):
+    """
+    Turn Rq-element into ZZ-vector, also known as: "Emb"
+    """
+    return x.list()
+
+
+def vec_coeff(v):
+    """
+    Turn Rq-vector to ZZ-vector using concatenation, also known as: "Emb"
+    """
+    return sum(map(coeff, v), [])
+
+
+def rot(a):
+    """
+    Turn Rq-vector into a ZZ-matrix of dimension n x (n*rk),
+    where `n` is degree of field and `rk` is length of vector.
+    Also known as: "Skew-Circ"
+    """
+    n, X = a[0].parent().degree(), a[0].parent().gen()
+    return [coeff(v * X**i) for v in a for i in range(n)]
+
+
+def MLWE_to_LWE(A, b, s, e):
+    """
+    Reduce ModuleLWE to LWE forgetting module structure.
+    """
+    return rot(A), coeff(b), vec_coeff(s), coeff(e)
+
+
+def select_samples(A, b, s, e, m):
+    """
+    Restricts an LWE sample to its first `m` samples.
+    """
+    return [a[:m] for a in A], b[:m], s, e[:m]
+    
+
+def RoundedDownLWE(n: int, m: int, q: int, p: int, lwe_inst: tuple):
+    """
+    Transforms a (unstructured) LWE sample having modulus `q`,
+    into one with a smaller modulus `p`.
+    """
+    Zp = Zmod(p)
+    def qpround(x): return round_down(x, q, p)
+    A, b, s, e = lwe_inst
+    # rA = matrix(Zp, [list(map(qpround, A[i])) for i in range(m)])
+    # rb = vector(Zp, map(qpround, b))
+    rA, rb = qpround(A), qpround(b)
+    re = balance(rb - rA * s, q=p)
+    return rA, rb, s, re
+
+
+def bai_galbraith_embedding(
+        n: int, q: int, w: int,
+        lwe: tuple, k: int, m: int,
+        s_stddev: float, e_stddev: float,
+        kept_rows: list,
+):
+    """
+    Create Bai-Galbraith embedding using only the 'kept_rows' rows from A
+    (from the LWE instance), using a scaling factor \\xi to balance the
+    smallness of the secret with the error.
+
+    :param k: number of entries to guess
+    :param m: number of LWE samples to keep, must be less than `len(A[0])`
+    :param s_stddev: standard deviation (sqrt variance) of a (nonzero!) secret coefficient
+    :param e_stddev: standard deviation (sqrt variance) of one error coefficient
+
+    :returns: the following basis (row notation):
+    [q I_m             0  0]
+    [A     -\\xi I_{n-k}  0]
+    [b                 0 kc]
+    """
+
+    # [ qI_m, 0\\ A, -\xi I_{n-k}]
+    A, b, __s, __e = lwe
+
+    # keep given columns, first m rows, drop the rest
+    assert len(A) == n
+    assert m <= len(A[0])
+    assert n - k == len(kept_rows)
+
+    A2 = matrix(ZZ, [[A[row][col] for col in range(m)] for row in kept_rows])
+    b2 = vector(ZZ, b[:m])
+    __s2 = vector(ZZ, [__s[col] for col in kept_rows])
+
+    kannan_coeff = ZZ(round(e_stddev))  # scalar used in Kannan embedding; 1 is also common.
+    xi = round(e_stddev / s_stddev)  # approximate scaling factor, rounded to integer
+
+    # build basis:
+    top_rows = (q * id_mat(m)).augment(mat0(m, n - k)     ).augment(mat0(m, 1))
+    mid_rows = (A2           ).augment(-xi * id_mat(n - k)).augment(mat0(n - k, 1))
+    bot_rows = (matrix(b2)   ).augment(mat0(1, n - k)     ).augment(kannan_coeff * id_mat(1))
+    basis = matrix(ZZ, top_rows.stack(mid_rows).stack(bot_rows))
+
+    target = list(__e[:m]) + list(xi * __s2) + [kannan_coeff]
+    target = balance(vector(ZZ, target), q=q)
+    # print("target = [e || xi s || kannan_coeff]")
+
+    return basis[:-1], basis[-1], target
+
