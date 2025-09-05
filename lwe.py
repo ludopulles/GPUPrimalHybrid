@@ -124,17 +124,17 @@ def RoundedDownLWE(lwe_inst: tuple, q: int, p: int):
     Transforms a (unstructured) LWE sample having modulus `q`,
     into one with a smaller modulus `p`.
     """
-    def qpround(x):
-        return int(round(x.lift_centered() * p / q))
+    def qpround(x): return round_down(x, q, p)
 
     Zp = Zmod(p)
     A, b, s, _ = lwe_inst
 
     rA = matrix(Zp, [list(map(qpround, a)) for a in A])
     rb = vector(Zp, map(qpround, b))
-    re = balance(rb - vector(ZZ, s) * rA, q=p)
+    s_ = vector(ZZ, [balance(x, q=q) for x in s])
+    re = balance(rb - s_ * rA, q=p)
 
-    return [a.list() for a in rA], rb.list(), s, re.list()
+    return [a.list() for a in rA], rb.list(), s_.list(), re.list()
 
 
 def bai_galbraith_embedding(
