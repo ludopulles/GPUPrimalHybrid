@@ -117,21 +117,24 @@ def select_samples(A, b, s, e, m):
     Restricts an LWE sample to its first `m` samples.
     """
     return [a[:m] for a in A], b[:m], s, e[:m]
-    
 
-def RoundedDownLWE(n: int, m: int, q: int, p: int, lwe_inst: tuple):
+
+def RoundedDownLWE(lwe_inst: tuple, q: int, p: int):
     """
     Transforms a (unstructured) LWE sample having modulus `q`,
     into one with a smaller modulus `p`.
     """
+    def qpround(x):
+        return int(round(x.lift_centered() * p / q))
+
     Zp = Zmod(p)
-    def qpround(x): return round_down(x, q, p)
-    A, b, s, e = lwe_inst
-    # rA = matrix(Zp, [list(map(qpround, A[i])) for i in range(m)])
-    # rb = vector(Zp, map(qpround, b))
-    rA, rb = qpround(A), qpround(b)
-    re = balance(rb - rA * s, q=p)
-    return rA, rb, s, re
+    A, b, s, _ = lwe_inst
+
+    rA = matrix(Zp, [list(map(qpround, a)) for a in A])
+    rb = vector(Zp, map(qpround, b))
+    re = balance(rb - vector(ZZ, s) * rA, q=p)
+
+    return [a.list() for a in rA], rb.list(), s, re.list()
 
 
 def bai_galbraith_embedding(

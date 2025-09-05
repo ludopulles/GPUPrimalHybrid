@@ -37,15 +37,17 @@ pushd lattice-estimator >/dev/null
 pip install -e .
 popd >/dev/null
 
-echo "Installing BLASter in editable mode..."
-pushd BLASter >/dev/null
-pip install -e .
-popd >/dev/null
-
 # Build G6K-GPU-Tensor
 echo "Building G6K-GPU-Tensor..."
 pushd G6K-GPU-Tensor >/dev/null
 ./rebuild.sh -f -y
 popd >/dev/null
+
+echo "Installing BLASter in editable mode..."
+pushd BLASter >/dev/null
+pip install -e .
+popd >/dev/null
+
+pip install -r requirements.txt
 
 echo "All done! Your environment is ready and repositories are cloned and installed."

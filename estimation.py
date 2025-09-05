@@ -1,4 +1,4 @@
-from math import ceil, comb, log
+from math import ceil, comb, log, sqrt
 from estimator import LWE, ND  # lattice-estimator
 
 
@@ -27,28 +27,45 @@ def required_iterations(params, success_probability=0.99):
 
 def find_attack_parameters(params):
     # Find attack parameters:
-    if all(key in params for key in ['beta', 'eta_svp', 'm', 'k', 'h_']):
-        return params
-
     params = params.copy()
     N = params["n"] * params.get("k_dim", 1)
+    q = params["p"] if "p" in params else params["q"]
 
     if params["secret_type"] == "binomial":
         Xs=ND.SparseBinomial(params["w"], eta=params["eta"])
         Xe=ND.CenteredBinomial(params["eta"])
+        if "p" in params:
+            assert params["eta"] == 2, "Variance is only computed here for eta=2"
+            var_DCIH = (1 + 1.6*params["w"]) / 12.0
+            Xe=ND.DiscreteGaussian(sqrt(var_DCIH))
     else:
         Xs=ND.SparseTernary(params["w"] // 2, (params["w"] + 1) // 2)
         Xe=ND.DiscreteGaussian(params["lwe_sigma"])
-    lwe_params = LWE.Parameters(n=N, q=params["q"], Xs=Xs, Xe=Xe)
-    print("Computing the best attack parameters...", flush=True)
-    cost = LWE.primal_hybrid(lwe_params, babai=True, mitm=False)
-    cost["m"] = min(cost["d"] - (N - cost["zeta"]), params["n"])
+        if "p" in params:
+            var_DCIH = (1 + params["w"]) / 12.0
+            Xe=ND.DiscreteGaussian(sqrt(var_DCIH))
 
-    attack_parameters = {
-        'beta': cost['beta'], 'eta_svp': cost['eta'], 'm': cost['m'], 'k': cost['zeta'],
-        'h_': cost['h_'],
-    }
-    return params | attack_parameters
+    if "p" in params:
+        print(f"Modulus-switching ({params['q']} > {q}): e_stddev ~ {Xe.stddev}")
+    lwe_params = LWE.Parameters(n=N, q=q, Xs=Xs, Xe=Xe)
+
+    if not all(key in params for key in ['beta', 'eta_svp', 'm', 'k', 'h_']):
+        print("Computing the best attack parameters...", flush=True)
+        cost = LWE.primal_hybrid(lwe_params, babai=True, mitm=False)
+        cost["m"] = min(cost["d"] - (N - cost["zeta"]), params["n"])
+        print(cost)
+
+        params |= {
+            'beta': cost['beta'], 'eta_svp': cost['eta'], 'm': cost['m'], 'k': cost['zeta'],
+            'h_': cost['h_'],
+        }
+    else:
+        print("Recomputing cost: ", flush=True)
+        cost = LWE.primal_hybrid.cost(
+            params['beta'], lwe_params, params['k'], babai=True, mitm=False, m = params['m'] + N
+        )
+        print(cost)
+    return params
 
 
 def output_params_info(params):

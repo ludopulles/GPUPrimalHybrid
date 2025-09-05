@@ -1,6 +1,7 @@
 """
 Parameters to attack
 """
+from sage.all import next_prime
 
 
 def type_binomial(eta=2, k_dim=2):
@@ -25,13 +26,19 @@ def type_ternary(lwe_sigma=3.19):
 
 atk_params = [
     # Binomial
-    type_binomial(2, 2) | {'n': 256, 'q':        3329, 'w': 11, 'beta': 40, 'eta_svp': 2, 'm': 200, 'k': 350, 'h_': 2},
-    #, 'eta_svp':52, 'k':372, 'm':289,'beta':53},
-    #type_binomial(2, 2) | {'n': 256, 'q':   179067461, 'w': 25},
-    #type_binomial(2, 3) | {'n': 256, 'q': 34088624597, 'w': 19},
+    # type_binomial(2, 2) | {'n': 256, 'q':        3329, 'w': 11, 'beta': 42, 'eta_svp': 2, 'm': 68, 'k': 402, 'h_': 2},
+    # type_binomial(2, 2) | {'n': 256, 'q':   179067461, 'w': 25},
+    # type_binomial(2, 3) | {'n': 256, 'q': 34088624597, 'w': 19, },
 
     # Ternary
-    #type_ternary() | {'n': 1024, 'q':        41223389, 'w': 12, 'beta': 46, 'eta_svp': 2, 'm': 190, 'k': 777},
-    #type_ternary() | {'n': 1024, 'q':       274887787, 'w': 12},
+    #type_ternary() | {'n': 1024, 'q':        41223389, 'w': 12},
+    type_ternary() | {'n': 1024, 'q':       274887787, 'w': 12},
     #type_ternary() | {'n': 1024, 'q': 607817174438671, 'w': 20},
 ]
+
+
+mod_switch_limit = 2**20
+mod_switch_prime = next_prime(mod_switch_limit)
+for i, p in enumerate(atk_params):
+    if p['q'] > mod_switch_limit:
+        p['p'] = mod_switch_prime

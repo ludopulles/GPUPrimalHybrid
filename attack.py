@@ -3,7 +3,7 @@
 
 import argparse
 import csv
-import cupy as cp
+import gc, cupy as cp
 import numpy as np
 import os
 import psutil
@@ -35,7 +35,7 @@ from instances import BaiGalCenteredScaledTernary, BaiGalModuleLWE, \
 from kernel_babai import nearest_plane_gpu, __babai_ranges, _build_choose_table_dev, \
     guess_batches_gpu, value_batches_fp32_gpu, precompute_nearest_plane
 from lwe import generate_CBD_MLWE, generate_ternary_MLWE, MLWE_to_LWE, bai_galbraith_embedding, \
-    select_samples
+    select_samples, RoundedDownLWE
 
 
 def BKZ_reduce(basis, beta):
@@ -273,8 +273,10 @@ def svp_babai_fp64_nr_projected(
             return v
         # need to add fallback to full CVP on the whole basis if fplll don't find it (but the probability is really low to be find here)
 
-    GUESS_BATCH = 1024 * 8
+    GUESS_BATCH = 1024 * 4
     VALUE_BATCH = 512  # 16
+
+    num_guesses, num_done = comb(k, w_guess), 0
 
     choose_dev = _build_choose_table_dev(k, w_guess + 1)  # Table of (k choose i)'s (i <= w_guess)
     vals_dev = cp.asarray(secret_nonzero_support, dtype=cp.float32)
@@ -290,6 +292,10 @@ def svp_babai_fp64_nr_projected(
             idx_size = guess_idx.shape[0]  # assert idx_size <= GUESS_BATCH
             # dimensions of guess_idx: idx_size x w_guess
             batch_size = idx_size * val_size 
+
+            num_done += idx_size
+            percentage = round(float(100.0 * num_done) / num_guesses)
+            # print(f"\rBabai-NP: {num_done:6d}/{num_guesses:6d} ({percentage:3d}%)", end="", flush=True)
 
             guess_batch = A_guess_gpu[:, guess_idx]  # (m, idx_size, w_guess)
             guess_batch = guess_batch.reshape(m * idx_size, w_guess)  # all columns of A^T concatenated
@@ -337,6 +343,7 @@ def svp_babai_fp64_nr_projected(
                 # print('Possible candidate: ', v, np.linalg.norm(v), 'vs', full_norm)
                 if np.linalg.norm(v) <= full_norm:
                     # TODO: also return s_guess
+                    print()
                     return v
 
                 # if CVP babai didn't find it give the right one, do it on the whole basis directly
@@ -348,9 +355,11 @@ def svp_babai_fp64_nr_projected(
                 v = t + cp.asnumpy(basis_gpu @ U)
                 v = (np.rint(v)).astype(np.int64)
                 if np.linalg.norm(v) <= full_norm:
+                    # print()
                     return v
                 # print(f"Discarding guess: full norm is {np.linalg.norm(v):.3f} > {full_norm:.3f}")
     # No solution found.
+    # print()
     return None
 
 
@@ -375,10 +384,20 @@ def generate_LWE_instance(params, _seed=None):
 
     lwe = MLWE_to_LWE(*lwe)
 
-    A, b, s, e = lwe
-    A_, b_, s_, e_ = map(lambda x: np.array(x, dtype=np.int64), [A, b, s, e])
+    A_, b_, s_, e_ = map(lambda x: np.array(x, dtype=np.int64), lwe)
     assert (b_ == (s_ @ A_ + e_) % params['q']).all(), "LWE instance is invalid"
+
     print(f"LWE instance is generated using seed {_seed}.")
+
+    lwe = select_samples(*lwe, params['m'])
+
+    if 'p' in params:
+        # Rounding down...
+        lwe = RoundedDownLWE(lwe, params['q'], params['p'])
+
+        # Check new instance.
+        A_, b_, s_, e_ = map(lambda x: np.array(x, dtype=np.int64), lwe)
+        assert (b_ == (s_ @ A_ + e_) % params['p']).all(), "LWE instance is invalid"
     return lwe
 
 
@@ -401,6 +420,46 @@ def drop_and_solve(lwe, params, iteration):
     :return: True if and only if the run was successful.
     """
     # LWE parameters:
+    N, k = params["n"] * params.get("k_dim", 1), params["k"]
+
+    # In this iteration, randomly select `k` columns to drop:
+    columns_dropped, columns_to_keep = pick_columns(N, k, _seed=iteration)
+
+    return solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep)
+
+
+def drop_and_solve_correct_guess(lwe, params, iteration):
+    N = params["n"] * params.get("k_dim", 1)
+    k, w, w_guess = params["k"], params["w"], params["h_"]
+
+    A, __b, __s, __e = lwe
+    # pick columns based on the secret
+
+    assert np.count_nonzero(__s) == params['w']
+    # select `k` indices `columns_dropped` in range(N) s.t. __s[columns_dropped] has weight w_guess
+
+    nonzeros, zeros = np.flatnonzero(__s), np.array([i for i in range(N) if __s[i] == 0])
+    assert len(nonzeros) == w and len(zeros) == N - w
+    # nonzeros: indices of all the non-zero entries
+    # zeros: indices of all the zero entries
+
+    # we want: columns_dropped = array of `k` elements, with `w_guess` nonzero, and rest zero
+    # we want: columns_to_keep: complement
+
+    drop_nz, keep_nz = pick_columns(len(nonzeros), w_guess, 2*iteration)
+    drop_ze, keep_ze = pick_columns(len(zeros), k - w_guess, 2*iteration + 1)
+
+    drop = sorted(np.concatenate((nonzeros[drop_nz], zeros[drop_ze])))
+    keep = sorted(np.concatenate((nonzeros[keep_nz], zeros[keep_ze])))
+
+    __s_guess = np.array(__s, dtype=np.int64)[drop]
+    assert np.count_nonzero(__s_guess) == w_guess
+    return solve_guess(lwe, params, iteration, drop, keep)
+
+
+
+def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep):
+    # LWE parameters:
     q, w = params["q"], params["w"]
     N = params["n"] * params.get("k_dim", 1)
     eta = params.get("eta", 1)  # width of centered binomial distribution
@@ -419,23 +478,21 @@ def drop_and_solve(lwe, params, iteration):
 
     secret_nonzero_support = list(range(-eta, 0)) + list(range(1, eta + 1))
 
-    # In this iteration, randomly select `k` columns to drop:
-    columns_dropped, columns_to_keep = pick_columns(N, k, _seed=iteration)
     A, __b, __s, __e = lwe
 
     # DEBUGGING PART (MAKES USE OF SECRET):
     # TODO: remove this code section
-    __s_guess = np.array(__s, dtype=np.int64)[columns_dropped]
+    # __s_guess = np.array(__s, dtype=np.int64)[columns_dropped]
     #__s_lat = np.array(__s, dtype=np.int64)[columns_to_keep]
-    if np.count_nonzero(__s_guess) == w_guess:
+    # if np.count_nonzero(__s_guess) == w_guess:
         # print(f"Correct secret guess: {__s_guess}")
-        print(f"Iteration #{iteration}: must succeed!", flush=True)
-        print(f"s_guess =  {__s_guess[np.nonzero(__s_guess)]} at {np.nonzero(__s_guess)[0]}", flush=True)
+        # print(f"Iteration #{iteration}: must succeed!", flush=True)
+        # print(f"s_guess =  {__s_guess[np.nonzero(__s_guess)]} at {np.nonzero(__s_guess)[0]}", flush=True)
     # else:
         # return False
         #print(f"Iteration #{iteration}: will fail.", flush=True)
         # return 1, 2  # fake result
-    del(__s_guess)  # END OF DEBUGGING PART
+    # del(__s_guess)  # END OF DEBUGGING PART
 
     if is_binomial:
         e_stddev = sqrt(eta/2)
@@ -455,6 +512,7 @@ def drop_and_solve(lwe, params, iteration):
         N, q, w, lwe, k, m, s_stddev, e_stddev, columns_to_keep
     )
     kannan_coeff = b_vec[-1]
+    print(__target[:20])
 
     # if is_binomial:
         # basis, b_vec, target = BaiGalModuleLWE(n, q, w, m, eta, lwe, k, columns_to_keep=columns_to_keep)
@@ -472,7 +530,11 @@ def drop_and_solve(lwe, params, iteration):
         # delete all 0 last dimension (because no b_vec)
         # basis = basis.delete_columns([basis.ncols() - 1])
 
+        t1 = time.time()
+
         reduced_basis, _ = BKZ_reduce(basis, beta)
+
+        t2 = time.time()
 
         if eta_svp == 2:
             # Guess where the nonzero entries in s_{guess} are, and
@@ -489,6 +551,11 @@ def drop_and_solve(lwe, params, iteration):
                 k, m, secret_nonzero_support, w_guess, estimation_vec,
             )
             target = svp_result[0]
+
+        t3 = time.time()
+
+        # BKZs, NPs, tot = t2 - t1, t3 - t2, t3 - t1
+        # print(f"Time spent on BKZ / Babai: {tot:.2f}s ({round(100*BKZs/tot):d}% vs {round(100*NPs/tot):d}%)")
 
     # here reconstruct the real vector so
     # N = params['k_dim']*n
@@ -585,8 +652,24 @@ def divide_range(n, k):
     return [(lst[i], lst[i+1]) for i in range(k) if lst[i] < lst[i+1]]
 
 
+def _pool_report(tag=""):
+    free, total = cp.cuda.runtime.memGetInfo()
+    used = total - free
+    mp = cp.get_default_memory_pool()
+    pp = cp.get_default_pinned_memory_pool()
+    print(f"[{tag}] used={used/1e9:.2f}GB | pool_used={mp.used_bytes()/1e9:.2f}GB | pool_held={mp.total_bytes()/1e9:.2f}GB")
+
+
 # --- orchestration -----------------------------------------------------------
 def parallel_run(iterations, lwe, params, result, num_workers):
+
+    if False:
+        # Only do the 'success' run
+        t = time.time()
+        result["success"] = drop_and_solve_correct_guess(lwe, params, 0)
+        result["time_elapsed"] = time.time() - t
+        return result
+
     num_gpus = gpu_count()
     assert num_gpus >= 1
 
@@ -596,7 +679,8 @@ def parallel_run(iterations, lwe, params, result, num_workers):
         num_gpus = num_workers  # Use less GPUs when having few workers.
 
     # partition CPU cores:
-    num_cores = psutil.cpu_count(logical=True) // num_workers
+    num_cores = psutil.cpu_count(logical=False) // num_workers
+    # num_cores = 1
     # cpu_sets = divide_range(psutil.cpu_count(logical=True), num_workers)
     # cpu_sets = [list(range(fr, to)) for (fr, to) in cpu_sets]
 
@@ -615,55 +699,71 @@ def parallel_run(iterations, lwe, params, result, num_workers):
 
     num_workers_per_gpu = [b - a for a, b in divide_range(num_workers, num_gpus)]
 
-    pools = [ProcessPoolExecutor(
-        max_workers=num_workers_per_gpu[gpu], mp_context=ctx,
-        initializer=_setup_process, initargs=(lwe, params, gpu, num_cores)
-    ) for gpu in range(num_gpus)]
+    set_num_cores(1)
 
-    #executor = ProcessPoolExecutor(
-    #    max_workers=num_workers, mp_context=ctx,
-    #    initializer=_setup_process, initargs=(lwe, params),
-    #)
+    if num_workers == 1:
+        start_time = time.time()
+        _setup_process(lwe, params, 0, num_cores)
+        try:
+            for i in tqdm(range(iterations), total=iterations, leave=False):
+                result["iterations_used"] += 1
+                if worker(i):
+                    result["success"] = True
+                    break
+        except KeyboardInterrupt:
+            # Cancel all jobs.
+            print("I got interrupted, shutting down...", flush=True)
+    else:
+        pools = [ProcessPoolExecutor(
+            max_workers=num_workers_per_gpu[gpu], mp_context=ctx,
+            initializer=_setup_process, initargs=(lwe, params, gpu, num_cores)
+        ) for gpu in range(num_gpus)]
 
-    start_time = time.time()
-    jobs = []
+        #executor = ProcessPoolExecutor(
+        #    max_workers=num_workers, mp_context=ctx,
+        #    initializer=_setup_process, initargs=(lwe, params),
+        #)
 
-    for g, (fr, to) in enumerate(divide_range(iterations, num_gpus)):
-        for i in range(fr, to):
-            jobs.append(pools[g].submit(worker, i))
+        start_time = time.time()
+        jobs = []
 
-    # jobs = []
+        for g, (fr, to) in enumerate(divide_range(iterations, num_gpus)):
+            for i in range(fr, to):
+                jobs.append(pools[g].submit(worker, i))
 
-    # divide work among workers:
-    # worker_range = divide_range(iterations, num_workers)
-    # Dispatch round-robin over GPUs
-    # for task_id, (start, stop) in enumerate(worker_range):
-        # g = task_id % num_gpus
-        # if task_id != 5: continue
-        # print(f"Task #{task_id} has GPU#{g} and {num_cores} CPUs")
-        # jobs.append(executors[g].submit(worker, start, stop, lwe, params, g))
-        # jobs.append(executor.submit(worker, i))
+        # jobs = []
 
-    try:
-        for f in tqdm(as_completed(jobs), total=len(jobs), leave=False):
-            # res, it_done = f.result()
-            result["iterations_used"] += 1
-            # res = f.result()
-            # result["iterations_used"] += it_done
-            if f.result():
-                result["success"] = True
-                # Cancel what hasn't started
-                for other in jobs:
-                    other.cancel()
-                break
-    except KeyboardInterrupt:
-        # Cancel all jobs.
-        print("I got interrupted, shutting down...", flush=True)
-        for f in jobs:
-            f.cancel()
-    finally:
-        for p in pools:
-            p.shutdown(cancel_futures=True)
+        # divide work among workers:
+        # worker_range = divide_range(iterations, num_workers)
+        # Dispatch round-robin over GPUs
+        # for task_id, (start, stop) in enumerate(worker_range):
+            # g = task_id % num_gpus
+            # if task_id != 5: continue
+            # print(f"Task #{task_id} has GPU#{g} and {num_cores} CPUs")
+            # jobs.append(executors[g].submit(worker, start, stop, lwe, params, g))
+            # jobs.append(executor.submit(worker, i))
+
+        try:
+            for f in tqdm(as_completed(jobs), total=len(jobs), leave=False):
+                # res, it_done = f.result()
+                result["iterations_used"] += 1
+                _pool_report('tqdm')
+                # res = f.result()
+                # result["iterations_used"] += it_done
+                if f.result():
+                    result["success"] = True
+                    # Cancel what hasn't started
+                    for other in jobs:
+                        other.cancel()
+                    break
+        except KeyboardInterrupt:
+            # Cancel all jobs.
+            print("I got interrupted, shutting down...", flush=True)
+            for f in jobs:
+                f.cancel()
+        finally:
+            for p in pools:
+                p.shutdown(cancel_futures=True)
 
     result["time_elapsed"] = time.time() - start_time
     if not result.get("success", False):
@@ -688,7 +788,6 @@ def run_single_attack(params, run_id, num_workers):
 
     # Create LWE instance
     lwe = generate_LWE_instance(params, _seed=run_id)
-    lwe = select_samples(*lwe, params['m'])
     iterations = required_iterations(params)
 
     # Run attack
@@ -739,7 +838,7 @@ if __name__ == "__main__":
         description='Attack LWE with sparse secrets'
     )
     parser.add_argument('--output', '-o', type=str, default='attack_results.csv', help='Output file')
-    parser.add_argument('--workers', '-w', type=int, default=16, help='Number of workers to allocate')
+    parser.add_argument('--workers', '-w', type=int, default=4, help='Number of workers to allocate')
     parser.add_argument('--runs', '-r', type=int, default=1, help='Number of repetitions (0: only estimate)')
 
     args = parser.parse_args()
