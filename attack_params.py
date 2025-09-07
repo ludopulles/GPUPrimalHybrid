@@ -37,7 +37,7 @@ atk_params = [
 ]
 
 
-mod_switch_limit = 2**20
+mod_switch_limit = 2**25
 mod_switch_prime = next_prime(mod_switch_limit)
 for i, p in enumerate(atk_params):
     if p['q'] > mod_switch_limit:

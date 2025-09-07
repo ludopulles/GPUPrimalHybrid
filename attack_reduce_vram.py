@@ -1,9 +1,14 @@
 # The values here are set for ternary attack on n=1024, q=2^26, w=12, it can be applied to other params by just editing cores, and num_workers
 # for the n=512, q= 3329, w=11, we can set cores=1, num_workers=(number of cores of the machine) (keep in mind that the machine need to have enough GPU also)
 
+# READ THIS:
+# This attack is with chunk and recreate a cupy context for each worker, so each worker doesn't have a context over all the GPUs, reducing the VRAM usage
+# but increasing the time a bit because of the context creation overhead (it's why we use chunk to reduce the number of context creation)
+# It's not updated for rounding down, but it should be easy to do it (just see the modification in attack.py)
+
 import argparse
 import csv
-import gc, cupy as cp
+import gc
 import numpy as np
 import os
 import psutil
@@ -22,23 +27,21 @@ from tqdm import tqdm
 from sage.all import seed
 
 # Local imports
-from blaster import reduce, get_profile
 
 from fpylll.util import gaussian_heuristic
 from fpylll import IntegerMatrix, CVP
 
 # In this directory
 import attack_params
-from estimation import find_attack_parameters, output_params_info, required_iterations, error_distribution_rounding
+from estimation import find_attack_parameters, output_params_info, required_iterations
 from instances import BaiGalCenteredScaledTernary, BaiGalModuleLWE, \
     estimate_target_upper_bound_ternary_vec, estimate_target_upper_bound_binomial_vec
-from kernel_babai import nearest_plane_gpu, __babai_ranges, _build_choose_table_dev, \
-    guess_batches_gpu, value_batches_fp32_gpu, precompute_nearest_plane
 from lwe import generate_CBD_MLWE, generate_ternary_MLWE, MLWE_to_LWE, bai_galbraith_embedding, \
     select_samples, RoundedDownLWE
 
 
 def BKZ_reduce(basis, beta):
+    from blaster import reduce
     t_start = time.time()
 
     B, B_red, U = np.ascontiguousarray(np.array(basis, dtype=np.int64).T), None, None
@@ -48,33 +51,33 @@ def BKZ_reduce(basis, beta):
     # target_norm = np.linalg.norm(target)
     # print("target", target)
     # print("target norm", target_norm)
-    # bkz_prog = 10
+    bkz_prog = 10
     # tours_final = 1
     # progressive schedule
-    # list_beta = [10] + list(range(40 + ((beta - 40) % bkz_prog), beta + 1, bkz_prog))
+    list_beta = [10] + list(range(40 + ((beta - 40) % bkz_prog), beta + 1, bkz_prog))
 
     # for i, beta in enumerate(list_beta):
     if beta < 40:
         # print("just do a DeepLLL-4")
         U, B_red, _ = reduce(
-            B, use_seysen=True, depth=4, bkz_tours=1, verbose=False,
+            B, use_seysen=True, depth=4, bkz_tours=1, verbose=False, cores=10
         )
     elif beta < 60:
         # print(f"try a BKZ-{beta} on a {basis.shape} matrix")
         U, B_red, _ = reduce(
-            B, use_seysen=True, beta=beta, bkz_tours=1, verbose=False,
+            B, use_seysen=True, beta=beta, bkz_tours=1, verbose=False, cores=10
         )
     elif beta <= 80:
         # print(f"try a BKZ-{beta} with G6K on a {basis.shape} matrix") # using pump and jump
         U, B_red, _ = reduce(
             B, use_seysen=True, beta=beta, bkz_tours=1, verbose=False,
-            g6k_use=True, bkz_size=beta + 20, jump=21,
+            g6k_use=True, bkz_size=beta + 20, jump=21, cores=10,
         )
     else:
         # print(f"try a BKZ-{beta} with G6K on a {basis.shape} matrix")
         U, B_red, _ = reduce(
             B, use_seysen=True, beta=beta, bkz_tours=1, verbose=False,
-            g6k_use=True, bkz_size=beta + 2, jump=2,
+            g6k_use=True, bkz_size=beta + 2, jump=2, cores=10,
         )
 
     # print(B_red)
@@ -85,6 +88,7 @@ def BKZ_reduce(basis, beta):
 
 
 def reduce_and_svp(basis, beta, eta, target, e_stddev):
+    from blaster import get_profile
     # ====== SVP option (basically the same as svp function) =======
     t_start = time.time()
     B_np, _ = BKZ_reduce(basis, beta)
@@ -223,8 +227,12 @@ def svp(
 
 def svp_babai_fp64_nr_projected(
     basis, eta, columns_dropped, columns_to_keep, A, b_vec, n, k, m, q,
-    secret_nonzero_support, w_guess, e_stddev, kannan_coeff
+    secret_nonzero_support, w_guess, e_stddev,
 ):
+    import cupy as cp
+    from kernel_babai import nearest_plane_gpu, __babai_ranges, _build_choose_table_dev, \
+    guess_batches_gpu, value_batches_fp32_gpu, precompute_nearest_plane
+
     basis_gpu = cp.asarray(basis.T, dtype=cp.float64, order="F")  # B_red (column notation)
 
     b_host = np.array(b_vec.list()[:m], dtype=np.int64)  # b
@@ -270,11 +278,10 @@ def svp_babai_fp64_nr_projected(
 
         # print(f"Babai solution: {v} of norm {np.linalg.norm(v)}")
         if np.linalg.norm(v) <= full_norm:
-            target = np.concatenate((v, [kannan_coeff]))
-            return target
+            return v
         # need to add fallback to full CVP on the whole basis if fplll don't find it (but the probability is really low to be find here)
 
-    GUESS_BATCH = 1024 * 4
+    GUESS_BATCH = 1024 * 16
     VALUE_BATCH = 512  # 16
 
     num_guesses, num_done = comb(k, w_guess), 0
@@ -344,13 +351,14 @@ def svp_babai_fp64_nr_projected(
                 # print('Possible candidate: ', v, np.linalg.norm(v), 'vs', full_norm)
                 if np.linalg.norm(v) <= full_norm:
                     # TODO: also return s_guess
-                    print()
-                    target = np.concatenate((v, [kannan_coeff]))
-                    return target
+                    print(v)
+                    return v
 
                 # if CVP babai didn't find it give the right one, do it on the whole basis directly
                 # try on whole basis
                 # fix not same name for avoid R_np error in the loop after this test (if it's not the right one)
+                print(QT.shape)
+                print(cp.asarray(t).shape)
                 y = QT @ cp.asarray(t)
                 U = cp.empty_like(y)
                 nearest_plane_gpu(R, y[:, None], U[:, None], *data)
@@ -358,8 +366,7 @@ def svp_babai_fp64_nr_projected(
                 v = (np.rint(v)).astype(np.int64)
                 if np.linalg.norm(v) <= full_norm:
                     # print()
-                    target = np.concatenate((v, [kannan_coeff]))
-                    return target
+                    return v
                 # print(f"Discarding guess: full norm is {np.linalg.norm(v):.3f} > {full_norm:.3f}")
     # No solution found.
     # print()
@@ -485,20 +492,21 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep):
 
     # DEBUGGING PART (MAKES USE OF SECRET):
     # TODO: remove this code section
-    __s_guess = np.array(__s, dtype=np.int64)[columns_dropped]
-    __s_lat = np.array(__s, dtype=np.int64)[columns_to_keep]
-    if np.count_nonzero(__s_guess) == w_guess:
-        print(f"Correct secret guess: {__s_guess}")
-        print(f"Iteration #{iteration}: must succeed!", flush=True)
-        print(f"s_guess =  {__s_guess[np.nonzero(__s_guess)]} at {np.nonzero(__s_guess)[0]}", flush=True)
-    else:
-        return False
-        print(f"Iteration #{iteration}: will fail.", flush=True)
-        return 1, 2  # fake result
-    del(__s_guess)  # END OF DEBUGGING PART
+    # __s_guess = np.array(__s, dtype=np.int64)[columns_dropped]
+    # __s_lat = np.array(__s, dtype=np.int64)[columns_to_keep]
+    # if np.count_nonzero(__s_guess) == w_guess:
+    #     # print(f"Correct secret guess: {__s_guess}")
+    #     print(f"Iteration #{iteration}: must succeed!", flush=True)
+    #     print(f"s_guess =  {__s_guess[np.nonzero(__s_guess)]} at {np.nonzero(__s_guess)[0]}", flush=True)
+    # else:
+    #     return False
+    #     print(f"Iteration #{iteration}: will fail.", flush=True)
+    #     return 1, 2  # fake result
+    # del(__s_guess)  # END OF DEBUGGING PART
 
     if is_binomial:
         e_stddev = sqrt(eta/2)
+
         # s_stddev = sqrt(eta/2) * sqrt((w - w_guess) / (n - k))
         # Determine variance for nonzero CBD sample:
         denominator = 4**eta - comb(2 * eta, eta)  # ~ 4**eta
@@ -510,11 +518,6 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep):
         s_stddev = 1 * sqrt((w - w_guess) / (N - k))
 
     # Build the embedding
-    if "p" in params: # Rounding down
-        q = int(params['p'])
-        e_stddev = error_distribution_rounding(params)
-        print(f"Rounding down to p={q}")
-    
     basis, b_vec, __target = bai_galbraith_embedding(
         N, q, w, lwe, k, m, s_stddev, e_stddev, columns_to_keep
     )
@@ -527,6 +530,7 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep):
     # else:
         # basis, b_vec, target = BaiGalCenteredScaledTernary(n, q, w, sigma, lwe, k, m, columns_to_keep=columns_to_keep)
         # estimation_vec = estimate_target_upper_bound_ternary_vec(N, w, e_stddev, k, m, q)
+    print(w_guess)
     if w_guess == 0:
         svp_result, _ = reduce_and_svp(
             basis.stack(b_vec), beta, eta_svp, __target, estimation_vec, svp=True
@@ -534,6 +538,7 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep):
         target = svp_result[0]
     else:
         # delete all 0 last dimension (because no b_vec)
+        #print(basis[:, -1])
         basis = basis.delete_columns([basis.ncols() - 1])
 
         t1 = time.time()
@@ -547,7 +552,7 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep):
             # check whether the corresponding target b - A_g s_g is a BDD instance using Babai NP.
             target = svp_babai_fp64_nr_projected(
                 reduced_basis, eta_svp, columns_dropped, columns_to_keep, A, b_vec, N,
-                k, m, q, secret_nonzero_support, w_guess, e_stddev, kannan_coeff
+                k, m, q, secret_nonzero_support, w_guess, e_stddev
             )
         else:
             # reappend with the tau to call the svp (not for babai)
@@ -584,6 +589,9 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep):
     #     s_full[col] = (s2[idx])
 
     # Successful if sv = +/-target
+    if target is None:
+        return False
+    target = np.concatenate((np.array(target, dtype=np.int64), np.array([kannan_coeff], dtype=np.int64)))
     return target is not None and (
         np.array_equal(target, __target) or np.array_equal(target, -__target)
     )
@@ -603,39 +611,24 @@ def _setup_process(lwe, params, gpu_id, num_cores):
     os.environ.setdefault("OMP_PROC_BIND", "close")
     os.environ.setdefault("OMP_PLACES", "cores")
 
-    ## TODO: This does not seem to work: paul: (it works only if you don't import cupy before see attack_reduce_vram.py)
-    #os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-    #os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)  # remap in device 0
+    ## TODO: This does not seem to work: (it works only if you don't import cupy before)
+    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)  # remap in device 0
 
     # set CPU affinity
     # os.sched_setaffinity(0, num_cores)
 
 
 # def worker(start, stop, params, gpu_id, num_cores):
-def worker(it):
-    global shared_lwe, shared_params, shared_gpu
-    # _init_worker(gpu_id, num_cores)
+def worker(start, stop):
+    import cupy as cp
+    global shared_lwe, shared_params
 
-    #np.set_printoptions(linewidth=10000, threshold=2147483647, suppress=True)
-    #cp.set_printoptions(linewidth=10000, threshold=2147483647, suppress=True)
-    #np.set_printoptions(formatter={'float': lambda x: "{0:0.3f}".format(x)}, precision=3)
-    #cp.set_printoptions(formatter={'float': lambda x: "{0:0.3f}".format(x)}, precision=3)
-
-    # print(f"Worker on GPU#{shared_gpu} has range {start}--{stop}")
-    with cp.cuda.Device(shared_gpu):  # Only one GPU per worker
-        return drop_and_solve(shared_lwe, shared_params, it)
-
-#        for i in range(start, stop):
-#            if stop_event.is_set():
-#                # Another worker had success, abort.
-#                return False, i - start
-#
-#            # Run the job
-#            if drop_and_solve(_global_lwe, params, i, gpu_id):
-#                stop_event.set()
-#                # We were successful!
-#                return True, i - start
-#    return False, stop - start
+    with cp.cuda.Device(0): 
+        for it in range(start, stop):
+            if drop_and_solve(shared_lwe, shared_params, it):
+                return True  # trouvé
+    return False
 
 
 def gpu_count():
@@ -666,111 +659,56 @@ def _pool_report(tag=""):
 
 
 # --- orchestration -----------------------------------------------------------
-def parallel_run(iterations, lwe, params, result, num_workers):
-
-    if False:
-        # Only do the 'success' run
-        t = time.time()
-        result["success"] = drop_and_solve_correct_guess(lwe, params, 0)
-        result["time_elapsed"] = time.time() - t
-        return result
-
+def parallel_run(iterations, lwe, params, result, num_workers, chunk_size=10):
     num_gpus = gpu_count()
     assert num_gpus >= 1
 
     if num_workers is None:
-        num_workers = num_gpus  # Use one worker per GPU
+        num_workers = num_gpus
     if num_gpus > num_workers:
-        num_gpus = num_workers  # Use less GPUs when having few workers.
+        num_gpus = num_workers
 
-    # partition CPU cores:
-    num_cores = psutil.cpu_count(logical=False) // num_workers
-    # num_cores = 1
-    # cpu_sets = divide_range(psutil.cpu_count(logical=True), num_workers)
-    # cpu_sets = [list(range(fr, to)) for (fr, to) in cpu_sets]
-
-    # stop_event = Manager().Event()
+    num_cores = 10
     ctx = get_context("spawn")
-
-    # Create a pool of executors, one for each GPU
-    #executors = []
-    #for g in range(num_gpus):
-    #    ex = ProcessPoolExecutor(
-    #        max_workers=num_workers // num_gpus, mp_context=ctx,
-    #        initializer=_init_worker, initargs=(g, cpu_sets[g]),
-    #        # initializer=_init_worker, initargs=(str(PROJECT_ROOT), g, cpu_sets[g]),
-    #    )
-    #    executors.append(ex)
 
     num_workers_per_gpu = [b - a for a, b in divide_range(num_workers, num_gpus)]
 
+    start_time = time.time()
+
     if num_workers == 1:
-        start_time = time.time()
         _setup_process(lwe, params, 0, num_cores)
-        try:
-            for i in tqdm(range(iterations), total=iterations, leave=False):
-                result["iterations_used"] += 1
-                if worker(i):
-                    result["success"] = True
-                    break
-        except KeyboardInterrupt:
-            # Cancel all jobs.
-            print("I got interrupted, shutting down...", flush=True)
+        for start in tqdm(range(0, iterations, chunk_size), leave=False):
+            stop = min(start + chunk_size, iterations)
+            result["iterations_used"] += (stop - start)
+            if worker(start, stop):
+                result["success"] = True
+                break
     else:
         pools = [ProcessPoolExecutor(
             max_workers=num_workers_per_gpu[gpu], mp_context=ctx,
             initializer=_setup_process, initargs=(lwe, params, gpu, num_cores)
         ) for gpu in range(num_gpus)]
 
-        #executor = ProcessPoolExecutor(
-        #    max_workers=num_workers, mp_context=ctx,
-        #    initializer=_setup_process, initargs=(lwe, params),
-        #)
-
-        start_time = time.time()
         jobs = []
-
         for g, (fr, to) in enumerate(divide_range(iterations, num_gpus)):
-            for i in range(fr, to):
-                jobs.append(pools[g].submit(worker, i))
-
-        # jobs = []
-
-        # divide work among workers:
-        # worker_range = divide_range(iterations, num_workers)
-        # Dispatch round-robin over GPUs
-        # for task_id, (start, stop) in enumerate(worker_range):
-            # g = task_id % num_gpus
-            # if task_id != 5: continue
-            # print(f"Task #{task_id} has GPU#{g} and {num_cores} CPUs")
-            # jobs.append(executors[g].submit(worker, start, stop, lwe, params, g))
-            # jobs.append(executor.submit(worker, i))
+            for start in range(fr, to, chunk_size):
+                stop = min(start + chunk_size, to)
+                jobs.append(pools[g].submit(worker, start, stop))
 
         try:
             for f in tqdm(as_completed(jobs), total=len(jobs), leave=False):
-                # res, it_done = f.result()
-                result["iterations_used"] += 1
-                # _pool_report('tqdm')
-                # res = f.result()
-                # result["iterations_used"] += it_done
+                result["iterations_used"] += chunk_size
                 if f.result():
                     result["success"] = True
-                    # Cancel what hasn't started
+                    # Annuler les jobs pas encore commencés
                     for other in jobs:
                         other.cancel()
                     break
-        except KeyboardInterrupt:
-            # Cancel all jobs.
-            print("I got interrupted, shutting down...", flush=True)
-            for f in jobs:
-                f.cancel()
         finally:
             for p in pools:
                 p.shutdown(cancel_futures=True)
 
     result["time_elapsed"] = time.time() - start_time
-    if not result.get("success", False):
-        pass
     return result
 
 

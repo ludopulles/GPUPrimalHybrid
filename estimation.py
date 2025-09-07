@@ -24,6 +24,28 @@ def required_iterations(params, success_probability=0.99):
     N, k, w, h_ = params["n"] * params.get("k_dim", 1), params['k'], params['w'], params['h_']
     return draws_for_confidence(N, k, w, h_, 0.99)
 
+def mu2(eta):
+    """
+    Second moment of a conditioned nonzero centered binomial distribution with parameter eta.
+    """
+    return (eta / 2.0) / (1 - (comb(2 * eta, eta) / 4**eta))
+
+def error_distribution_rounding(params):
+    """
+    Estimate the standard deviation of the error after modulus switching. (assume that p/q sigma_error is small enough)
+    """
+    if "p" not in params:
+        #raise error it does not make sense to call this function
+        raise ValueError("Modulus switching not applied, 'p' not in params")
+    
+    q = params["q"]
+    p = params["p"]
+    if params["secret_type"] == "binomial":
+        eta = params["eta"]
+        new_variance = (1 + mu2(params["eta"])*(params["w"]))/12.0
+    else:
+        new_variance = (1 + (params["w"]))/12.0
+    return sqrt(new_variance)
 
 def find_attack_parameters(params):
     # Find attack parameters:

@@ -7,3 +7,6 @@ saved_profiles
 *.nsys-rep
 *.sqlite
 .ruff_cache
+BLASter
+G6K-GPU-Tensor
+lattice-estimator
