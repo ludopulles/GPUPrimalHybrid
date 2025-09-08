@@ -679,8 +679,8 @@ def parallel_run(iterations, lwe, params, result, num_workers):
         num_gpus = num_workers  # Use less GPUs when having few workers.
 
     # partition CPU cores:
-    num_cores = psutil.cpu_count(logical=False) // num_workers
-    # num_cores = 1
+    num_cores = (psutil.cpu_count(logical=False) - 2) // num_workers
+
     # cpu_sets = divide_range(psutil.cpu_count(logical=True), num_workers)
     # cpu_sets = [list(range(fr, to)) for (fr, to) in cpu_sets]
 
