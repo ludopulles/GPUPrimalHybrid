@@ -266,8 +266,12 @@ def svp_babai_fp64_nr_projected(
         # Call Babai using FPyLLL:
         t = np.concatenate((b_host, np.zeros(n - k)))
         t = np.rint(t).astype(np.int64)
+
+        t_fplll = time.time()
         B = IntegerMatrix.from_matrix(basis)
         v = t - np.array(CVP.babai(B, t), dtype=np.int64)
+        t_fplll = time.time() - t_fplll
+        print("FPLLL invocation took {t_fplll:.2f} seconds.", flush=True)
 
         # print(f"Babai solution: {v} of norm {np.linalg.norm(v)}")
         if np.linalg.norm(v) <= full_norm:
@@ -341,9 +345,13 @@ def svp_babai_fp64_nr_projected(
                 t = np.concatenate((cp.asnumpy(bs_gpu[:, idx_t]), np.zeros(n-k)))
                 t = np.rint(t).astype(np.int64)
 
+                t_fplll = time.time()
                 B = IntegerMatrix.from_matrix(basis)
                 v = t - np.array(CVP.babai(B, t), dtype=np.int64)
                 # print('Possible candidate: ', v, np.linalg.norm(v), 'vs', full_norm)
+                t_fplll = time.time() - t_fplll
+                print("FPLLL invocation took {t_fplll:.2f} seconds.", flush=True)
+
                 if np.linalg.norm(v) <= full_norm:
                     # TODO: also return s_guess
                     if report_progress:
