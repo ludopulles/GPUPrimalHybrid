@@ -130,10 +130,10 @@ def reduce_and_svp(basis, beta, eta, target, e_stddev):
 
     if (B_np[:, 0] == target).all() or (B_np[:, 0] == -target).all():
         finish = time.time()
-        return B_np.T, finish - timestart
+        return B_np.T, finish - t_start
 
     finish = time.time()
-    return B_np.T, finish - timestart
+    return B_np.T, finish - t_start
 
 
 def svp(
@@ -293,7 +293,7 @@ def svp_babai_fp64_nr_projected(
             # 1 <= i_1 < i_2 < ... < i_{w_guess} <= k.
             idx_size = guess_idx.shape[0]  # assert idx_size <= GUESS_BATCH
             # dimensions of guess_idx: idx_size x w_guess
-            batch_size = idx_size * val_size 
+            batch_size = idx_size * val_size
 
             num_done += idx_size
             percentage = round(float(100.0 * num_done) / num_guesses)
@@ -831,14 +831,15 @@ def batch_attack(output_csv, num_workers, runs, only_correct_guess):
             for run_id in range(runs):
                 result = run_single_attack(params_, run_id, num_workers, only_correct_guess)
                 writer.writerow(result)
+                csvfile.flush()
                 if result["time_elapsed"] is not None:
-                    print(
-                        f"Run {run_id}: Success={result['success']}, Time={result['time_elapsed']:.2f}s, Iter={result['iterations_used']}, Error={result['error'] is not None}"
-                    )
+                    print(f"Run {run_id}: Success={result['success']}, "
+                          f"Time={result['time_elapsed']:.2f}s, "
+                          f"Iter={result['iterations_used']}, "
+                          f"Error={result['error'] is not None}", flush=True)
                 else:
-                    print(
-                        f"Run {run_id}: Error occurred: {result['error'] if result['error'] else 'Unknown error'}"
-                    )
+                    error = result['error'] if result['error'] else 'Unknown error'
+                    print(f"Run {run_id}: Error occurred: {error}", flush=True)
     print(f"\nAll runs completed. Results saved to {output_csv}")
 
 
