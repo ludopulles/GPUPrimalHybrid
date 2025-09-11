@@ -38,18 +38,19 @@ from lwe import generate_CBD_MLWE, generate_ternary_MLWE, MLWE_to_LWE, bai_galbr
     select_samples, RoundedDownLWE
 
 
-def BKZ_reduce(basis, beta):
+def BKZ_reduce(basis, beta, verbose=False):
     B, B_red, U = np.ascontiguousarray(np.array(basis, dtype=np.int64).T), None, None
+    kwargs = {'bkz_tours': 1, 'bkz_prog': 1, 'use_seysen': True, 'verbose': verbose}
+    if verbose:
+        print(f"BKZ-{beta} reducing a rank-{B.shape[1]} basis...", flush=True)
 
-    kwargs = {'bkz_tours': 1, 'bkz_prog': 1, 'use_seysen': True, 'verbose': True}
-    print(f"BKZ-{beta} reducing a rank-{B.shape[1]} basis...", flush=True)
-    if beta < 40:
+    if beta < 40:  # DeepLLL
         U, B_red, _ = reduce(B, depth=4, **kwargs)
-    elif beta < 60:
+    elif beta < 60:  # BKZ-enum
         U, B_red, _ = reduce(B, beta=beta, bkz_size=80, **kwargs)
-    elif beta <= 80:
+    elif beta <= 80:  # BKZ-G6K + jumps
         U, B_red, _ = reduce(B, beta=beta, g6k_use=True, bkz_size=beta + 20, jump=21, **kwargs)
-    else:
+    else:  # BKZ-G6K + small jumps
         U, B_red, _ = reduce(B, beta=beta, g6k_use=True, bkz_size=beta + 2, jump=2, **kwargs)
 
     # assert (B_red == B @ U).all()
@@ -519,9 +520,7 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, report
         basis = basis.delete_columns([basis.ncols() - 1])
 
         t1 = time.time()
-
-        reduced_basis = BKZ_reduce(basis, beta)
-
+        reduced_basis = BKZ_reduce(basis, beta, verbose=report_progress)
         t2 = time.time()
 
         if eta_svp == 2:
@@ -587,8 +586,8 @@ def _setup_process(lwe, params, gpu_id, num_cores):
     os.environ.setdefault("OMP_PLACES", "cores")
 
     ## TODO: This does not seem to work: paul: (it works only if you don't import cupy before see attack_reduce_vram.py)
-    #os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-    #os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)  # remap in device 0
+    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)  # remap in device 0
 
     # set CPU affinity
     # os.sched_setaffinity(0, num_cores)
