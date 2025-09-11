@@ -697,6 +697,7 @@ def parallel_run(iterations, lwe, params, result, num_workers, only_correct_gues
         except KeyboardInterrupt:
             # Cancel all jobs.
             print("I got interrupted, shutting down...", flush=True)
+            raise
     else:
         pools = [ProcessPoolExecutor(
             max_workers=num_workers_per_gpu[gpu], mp_context=ctx,
@@ -745,6 +746,7 @@ def parallel_run(iterations, lwe, params, result, num_workers, only_correct_gues
             print("I got interrupted, shutting down...", flush=True)
             for f in jobs:
                 f.cancel()
+            raise
         finally:
             for p in pools:
                 p.shutdown(cancel_futures=True)
@@ -816,6 +818,8 @@ def batch_attack(output_csv, num_workers, runs, only_correct_guess):
                 else:
                     error = result['error'] if result['error'] else 'Unknown error'
                     print(f"Run {run_id}: Error occurred: {error}", flush=True)
+                if result["error"] and "KeyboardInterrupt" in result["error"]:
+                    break
     print(f"\nAll runs completed. Results saved to {output_csv}")
 
 
