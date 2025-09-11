@@ -196,8 +196,7 @@ def svp(
 
 def svp_babai_fp64_nr_projected(
     basis, eta, columns_dropped, columns_to_keep, A, b_vec, n, k, m, q,
-    secret_nonzero_support, w_guess, e_stddev, kannan_coeff,
-    report_progress=False
+    secret_nonzero_support, w_guess, e_stddev, kannan_coeff, report_progress=False
 ):
     basis_gpu = cp.asarray(basis.T, dtype=cp.float64, order="F")  # B_red (column notation)
 
@@ -247,10 +246,13 @@ def svp_babai_fp64_nr_projected(
             return target
         # need to add fallback to full CVP on the whole basis if fplll don't find it (but the probability is really low to be find here)
 
-    GUESS_BATCH = 1024 * 4
-    VALUE_BATCH = 512  # 16
+    if not w_guess:
+        return None
 
-    num_guesses, num_done = comb(k, w_guess), 0
+    GUESS_BATCH = 1024 * 4
+    VALUE_BATCH = 512
+
+    num_guesses, num_done = comb(k, w_guess) * w_guess**len(secret_nonzero_support), 0
 
     choose_dev = _build_choose_table_dev(k, w_guess + 1)  # Table of (k choose i)'s (i <= w_guess)
     vals_dev = cp.asarray(secret_nonzero_support, dtype=cp.float32)
@@ -267,7 +269,7 @@ def svp_babai_fp64_nr_projected(
             # dimensions of guess_idx: idx_size x w_guess
             batch_size = idx_size * val_size
 
-            num_done += idx_size
+            num_done += batch_size
             percentage = round(float(100.0 * num_done) / num_guesses)
             if report_progress:
                 print(f"\rBabai-NP: {num_done:6d}/{num_guesses:6d} ({percentage:3d}%)", end="", flush=True)
@@ -397,7 +399,7 @@ def pick_columns(n, k, _seed=None):
     return sorted(order[:k]), sorted(order[k:])  # drop, keep
 
 
-def drop_and_solve(lwe, params, iteration):
+def drop_and_solve(lwe, params, iteration, verbose=False):
     """
     Placeholder for the function that drops and solves the LWE instance.
 
@@ -412,7 +414,8 @@ def drop_and_solve(lwe, params, iteration):
     # In this iteration, randomly select `k` columns to drop:
     columns_dropped, columns_to_keep = pick_columns(N, k, _seed=iteration)
 
-    return solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep)
+    return solve_guess(
+        lwe, params, iteration, columns_dropped, columns_to_keep, report_progress=verbose)
 
 
 def drop_and_solve_correct_guess(lwe, params, iteration):
@@ -470,15 +473,8 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, report
     # DEBUGGING PART (MAKES USE OF SECRET):
     # TODO: remove this code section
     __s_guess = np.array(__s, dtype=np.int64)[columns_dropped]
-    __s_lat = np.array(__s, dtype=np.int64)[columns_to_keep]
     if np.count_nonzero(__s_guess) == w_guess:
-        # print(f"Correct secret guess: {__s_guess}")
-        print(f"Iteration #{iteration}: must succeed!")
-        print(f"s_guess =  {__s_guess[np.nonzero(__s_guess)]} at {np.nonzero(__s_guess)[0]}", flush=True)
-    else:
-        return False
-        print(f"Iteration #{iteration}: will fail.", flush=True)
-        return 1, 2  # fake result
+        print(f"Iteration #{iteration}: contains correct guess: {__s_guess[np.nonzero(__s_guess)]} at {np.nonzero(__s_guess)[0]}", flush=True)
     del(__s_guess)  # END OF DEBUGGING PART
 
     if is_binomial:
@@ -504,46 +500,34 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, report
     )
     kannan_coeff = b_vec[-1]
 
-    # if is_binomial:
-        # basis, b_vec, target = BaiGalModuleLWE(n, q, w, m, eta, lwe, k, columns_to_keep=columns_to_keep)
-        # estimation_vec = estimate_target_upper_bound_binomial_vec(N, w, e_stddev, k, m, eta, q)
-    # else:
-        # basis, b_vec, target = BaiGalCenteredScaledTernary(n, q, w, sigma, lwe, k, m, columns_to_keep=columns_to_keep)
-        # estimation_vec = estimate_target_upper_bound_ternary_vec(N, w, e_stddev, k, m, q)
-    if w_guess == 0:
-        svp_result, _ = reduce_and_svp(
-            basis.stack(b_vec), beta, eta_svp, __target, estimation_vec, svp=True
+    # delete all 0 last dimension (because no b_vec)
+    basis = basis.delete_columns([basis.ncols() - 1])
+
+    t1 = time.time()
+    reduced_basis = BKZ_reduce(basis, beta, verbose=report_progress)
+    t2 = time.time()
+
+    if eta_svp == 2:
+        # Guess where the nonzero entries in s_{guess} are, and
+        # check whether the corresponding target b - A_g s_g is a BDD instance using Babai NP.
+        target = svp_babai_fp64_nr_projected(
+            reduced_basis, eta_svp, columns_dropped, columns_to_keep, A, b_vec, N,
+            k, m, q, secret_nonzero_support, w_guess, e_stddev, kannan_coeff,
+            report_progress=report_progress
+        )
+    else:
+        # reappend with the tau to call the svp (not for babai)
+        reduced_basis = np.insert(reduced_basis, reduced_basis.shape[1], 0, axis=1)
+        svp_result, _ = svp(
+            reduced_basis, eta_svp, columns_dropped, columns_to_keep, A, b_vec, N,
+            k, m, secret_nonzero_support, w_guess, estimation_vec,
         )
         target = svp_result[0]
-    else:
-        # delete all 0 last dimension (because no b_vec)
-        basis = basis.delete_columns([basis.ncols() - 1])
 
-        t1 = time.time()
-        reduced_basis = BKZ_reduce(basis, beta, verbose=report_progress)
-        t2 = time.time()
-
-        if eta_svp == 2:
-            # Guess where the nonzero entries in s_{guess} are, and
-            # check whether the corresponding target b - A_g s_g is a BDD instance using Babai NP.
-            target = svp_babai_fp64_nr_projected(
-                reduced_basis, eta_svp, columns_dropped, columns_to_keep, A, b_vec, N,
-                k, m, q, secret_nonzero_support, w_guess, e_stddev, kannan_coeff,
-                report_progress=report_progress
-            )
-        else:
-            # reappend with the tau to call the svp (not for babai)
-            reduced_basis = np.insert(reduced_basis, reduced_basis.shape[1], 0, axis=1)
-            svp_result, _ = svp(
-                reduced_basis, eta_svp, columns_dropped, columns_to_keep, A, b_vec, N,
-                k, m, secret_nonzero_support, w_guess, estimation_vec,
-            )
-            target = svp_result[0]
-
-        if report_progress:
-            t3 = time.time()
-            BKZs, NPs, tot = t2 - t1, t3 - t2, t3 - t1
-            print(f"Time spent on BKZ / Babai: {tot:.2f}s ({round(100*BKZs/tot):d}% vs {round(100*NPs/tot):d}%)")
+    if report_progress:
+        t3 = time.time()
+        BKZs, NPs, tot = t2 - t1, t3 - t2, t3 - t1
+        print(f"Time spent on BKZ / Babai: {tot:.2f}s ({round(100*BKZs/tot):d}% vs {round(100*NPs/tot):d}%)")
 
     # here reconstruct the real vector so
     # N = params['k_dim']*n
@@ -594,7 +578,7 @@ def _setup_process(lwe, params, gpu_id, num_cores):
 
 
 # def worker(start, stop, params, gpu_id, num_cores):
-def worker(it):
+def worker(it, verbose):
     global shared_lwe, shared_params, shared_gpu
     # _init_worker(gpu_id, num_cores)
 
@@ -605,7 +589,7 @@ def worker(it):
 
     # print(f"Worker on GPU#{shared_gpu} has range {start}--{stop}")
     with cp.cuda.Device(shared_gpu):  # Only one GPU per worker
-        return drop_and_solve(shared_lwe, shared_params, it)
+        return drop_and_solve(shared_lwe, shared_params, it, verbose)
 
 #        for i in range(start, stop):
 #            if stop_event.is_set():
@@ -648,7 +632,7 @@ def _pool_report(tag=""):
 
 
 # --- orchestration -----------------------------------------------------------
-def parallel_run(iterations, lwe, params, result, num_workers, only_correct_guess=False):
+def parallel_run(iterations, lwe, params, result, num_workers, only_correct_guess, verbose):
     if only_correct_guess:
         # Only do the 'success' run
         t = time.time()
@@ -691,7 +675,7 @@ def parallel_run(iterations, lwe, params, result, num_workers, only_correct_gues
         try:
             for i in tqdm(range(iterations), total=iterations, leave=False):
                 result["iterations_used"] += 1
-                if worker(i):
+                if worker(i, verbose):
                     result["success"] = True
                     break
         except KeyboardInterrupt:
@@ -714,7 +698,7 @@ def parallel_run(iterations, lwe, params, result, num_workers, only_correct_gues
 
         for g, (fr, to) in enumerate(divide_range(iterations, num_gpus)):
             for i in range(fr, to):
-                jobs.append(pools[g].submit(worker, i))
+                jobs.append(pools[g].submit(worker, i, verbose))
 
         # jobs = []
 
@@ -757,7 +741,7 @@ def parallel_run(iterations, lwe, params, result, num_workers, only_correct_gues
     return result
 
 
-def run_single_attack(params, run_id, num_workers, only_correct_guess=False):
+def run_single_attack(params, run_id, num_workers, only_correct_guess=False, verbose=False):
     result = {
         "run_id": run_id,
         "n": params["n"],
@@ -779,14 +763,14 @@ def run_single_attack(params, run_id, num_workers, only_correct_guess=False):
     # Run attack
     try:
         result = parallel_run(
-            iterations, lwe, params, result, num_workers, only_correct_guess=only_correct_guess
+            iterations, lwe, params, result, num_workers, only_correct_guess, verbose
         )
     except:
         result["error"] = traceback.format_exc()
     return result
 
 
-def batch_attack(output_csv, num_workers, runs, only_correct_guess):
+def batch_attack(output_csv, num_workers, runs, only_correct_guess, verbose=False):
     if runs == 0:
         for params in attack_params.atk_params:
             params_ = find_attack_parameters(params)
@@ -807,7 +791,7 @@ def batch_attack(output_csv, num_workers, runs, only_correct_guess):
             output_params_info(params_)
 
             for run_id in range(runs):
-                result = run_single_attack(params_, run_id, num_workers, only_correct_guess)
+                result = run_single_attack(params_, run_id, num_workers, only_correct_guess, verbose)
                 writer.writerow(result)
                 csvfile.flush()
                 if result["time_elapsed"] is not None:
@@ -832,6 +816,7 @@ if __name__ == "__main__":
     parser.add_argument('--workers', '-w', type=int, default=4, help='Number of workers to allocate')
     parser.add_argument('--runs', '-r', type=int, default=1, help='Number of repetitions (0: only estimate)')
     parser.add_argument('--correct', '-c', action='store_true', help='Only run attack on correct guesses')
+    parser.add_argument('--verbose', '-v', action='store_true', help='More verbose output')
 
     args = parser.parse_args()
-    batch_attack(args.output, args.workers, args.runs, args.correct)
+    batch_attack(args.output, args.workers, args.runs, args.correct, args.verbose)

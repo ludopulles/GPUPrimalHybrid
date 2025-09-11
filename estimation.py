@@ -9,15 +9,12 @@ def expected_draws(n, k, w, h):
     you succeed when `h` out of the  `k` bits (taken randomly) are 1s.
     """
     p = comb(n - k, w - h) * comb(k, h) / comb(n, w)
-    # p = comb(n - w, k) / comb(n, k)
     return 1 / p
 
 
 def draws_for_confidence(n, k, w, h, confidence):
     p = comb(n - k, w - h) * comb(k, h) / comb(n, w)
-    # p = comb(n - w, k) / comb(n, k)
-    t = log(1 - confidence) / log(1 - p)
-    return ceil(t)
+    return 1 if p > confidence else ceil(log(1 - confidence) / log(1 - p))
 
 
 def required_iterations(params, success_probability=0.99):
