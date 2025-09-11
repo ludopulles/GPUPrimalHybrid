@@ -92,7 +92,7 @@ def vec_coeff(v):
     """
     Turn Rq-vector to ZZ-vector using concatenation, also known as: "Emb"
     """
-    return sum(map(coeff, v), [])
+    return sum(map(lambda x: [y.lift_centered() for y in x], v), [])
 
 
 def rot(a):

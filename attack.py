@@ -39,55 +39,27 @@ from lwe import generate_CBD_MLWE, generate_ternary_MLWE, MLWE_to_LWE, bai_galbr
 
 
 def BKZ_reduce(basis, beta):
-    t_start = time.time()
-
     B, B_red, U = np.ascontiguousarray(np.array(basis, dtype=np.int64).T), None, None
 
-    # final_beta = beta
-    # print(f"try a progressive BKZ-{beta} on a {basis.shape} matrix")
-    # target_norm = np.linalg.norm(target)
-    # print("target", target)
-    # print("target norm", target_norm)
-    # bkz_prog = 10
-    # tours_final = 1
-    # progressive schedule
-    # list_beta = [10] + list(range(40 + ((beta - 40) % bkz_prog), beta + 1, bkz_prog))
-
-    # for i, beta in enumerate(list_beta):
+    kwargs = {'bkz_tours': 1, 'bkz_prog': 1, 'use_seysen': True, 'verbose': True}
+    print(f"BKZ-{beta} reducing a rank-{B.shape[1]} basis...", flush=True)
     if beta < 40:
-        # print("just do a DeepLLL-4")
-        U, B_red, _ = reduce(
-            B, use_seysen=True, depth=4, bkz_tours=1, verbose=False,
-        )
+        U, B_red, _ = reduce(B, depth=4, **kwargs)
     elif beta < 60:
-        # print(f"try a BKZ-{beta} on a {basis.shape} matrix")
-        U, B_red, _ = reduce(
-            B, use_seysen=True, beta=beta, bkz_tours=1, verbose=False,
-        )
+        U, B_red, _ = reduce(B, beta=beta, bkz_size=80, **kwargs)
     elif beta <= 80:
-        # print(f"try a BKZ-{beta} with G6K on a {basis.shape} matrix") # using pump and jump
-        U, B_red, _ = reduce(
-            B, use_seysen=True, beta=beta, bkz_tours=1, verbose=False,
-            g6k_use=True, bkz_size=beta + 20, jump=21,
-        )
+        U, B_red, _ = reduce(B, beta=beta, g6k_use=True, bkz_size=beta + 20, jump=21, **kwargs)
     else:
-        # print(f"try a BKZ-{beta} with G6K on a {basis.shape} matrix")
-        U, B_red, _ = reduce(
-            B, use_seysen=True, beta=beta, bkz_tours=1, verbose=False,
-            g6k_use=True, bkz_size=beta + 2, jump=2,
-        )
+        U, B_red, _ = reduce(B, beta=beta, g6k_use=True, bkz_size=beta + 2, jump=2, **kwargs)
 
-    # print(B_red)
     # assert (B_red == B @ U).all()
-
-    t_finish = time.time()
-    return B_red.T, t_finish - t_start
+    return B_red.T
 
 
 def reduce_and_svp(basis, beta, eta, target, e_stddev):
     # ====== SVP option (basically the same as svp function) =======
     t_start = time.time()
-    B_np, _ = BKZ_reduce(basis, beta)
+    B_np = BKZ_reduce(basis, beta)
     B_np = B_np.T  # undo the transpose in BKZ_reduce
 
     if (B_np[:, 0] == target).all() or (B_np[:, 0] == -target).all():
@@ -309,8 +281,8 @@ def svp_babai_fp64_nr_projected(
             guess_batch = (guess_batch @ guess_val.astype(cp.float64)).reshape(m, batch_size)  # A s_g
 
             # Make copies of b:
-            bs_gpu = cp.broadcast_to(b_gpu[:, None], (m, batch_size))
-            bs_gpu = (bs_gpu - guess_batch) % q
+            bs_gpu = cp.broadcast_to(b_gpu[:, None], (m, batch_size)) - guess_batch
+            bs_gpu %= q
 
             Y = QT_np @ bs_gpu  # Q^T (b - A_g s_g)
             U = cp.empty((babai_dim, batch_size), dtype=cp.float64)
@@ -532,7 +504,6 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, report
         N, q, w, lwe, k, m, s_stddev, e_stddev, columns_to_keep
     )
     kannan_coeff = b_vec[-1]
-    print(__target[:20])
 
     # if is_binomial:
         # basis, b_vec, target = BaiGalModuleLWE(n, q, w, m, eta, lwe, k, columns_to_keep=columns_to_keep)
@@ -551,7 +522,7 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, report
 
         t1 = time.time()
 
-        reduced_basis, _ = BKZ_reduce(basis, beta)
+        reduced_basis = BKZ_reduce(basis, beta)
 
         t2 = time.time()
 
@@ -572,10 +543,10 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, report
             )
             target = svp_result[0]
 
-        t3 = time.time()
-
-        # BKZs, NPs, tot = t2 - t1, t3 - t2, t3 - t1
-        # print(f"Time spent on BKZ / Babai: {tot:.2f}s ({round(100*BKZs/tot):d}% vs {round(100*NPs/tot):d}%)")
+        if report_progress:
+            t3 = time.time()
+            BKZs, NPs, tot = t2 - t1, t3 - t2, t3 - t1
+            print(f"Time spent on BKZ / Babai: {tot:.2f}s ({round(100*BKZs/tot):d}% vs {round(100*NPs/tot):d}%)")
 
     # here reconstruct the real vector so
     # N = params['k_dim']*n
