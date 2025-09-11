@@ -220,20 +220,15 @@ def svp_babai_fp64_nr_projected(
     R_np = R[-babai_dim:, -babai_dim:]
 
     # setup variables for Babai Nearest Plane:
-    data = precompute_nearest_plane(R)
-    data_NP = precompute_nearest_plane(R_np)
+    data_np, data = precompute_nearest_plane(R_np), None
 
     full_sqnorm, proj_sqnorm = 2 * e_stddev**2 * (m + n - k), 2 * e_stddev**2 * babai_dim
     full_norm, proj_norm = sqrt(full_sqnorm), sqrt(proj_sqnorm)
 
-    # print(cp.rint(y0).astype(cp.int64))
-    # print(cp.linalg.norm(y0))
-
-    # y0 = QT_np @ (cp.asarray(__As, dtype=cp.float64) + cp.asarray(__e, dtype=cp.float64))
     y0 = QT_np @ b_gpu  # y0 = Q^T b
     U = cp.empty_like(y0)
 
-    nearest_plane_gpu(R_np, y0[:, None], U[:, None], *data_NP)
+    nearest_plane_gpu(R_np, y0[:, None], U[:, None], *data_np)
     if bool((cp.linalg.norm(y0) <= proj_norm).get()):
         # Call Babai using FPyLLL:
         t = np.concatenate((b_host, np.zeros(n - k)))
@@ -286,7 +281,7 @@ def svp_babai_fp64_nr_projected(
 
             Y = QT_np @ bs_gpu  # Q^T (b - A_g s_g)
             U = cp.empty((babai_dim, batch_size), dtype=cp.float64)
-            nearest_plane_gpu(R_np, Y, U, *data_NP)
+            nearest_plane_gpu(R_np, Y, U, *data_np)
 
             ## TODO: remove
             #for bid in range(val_size):
@@ -334,6 +329,9 @@ def svp_babai_fp64_nr_projected(
                 # if CVP babai didn't find it give the right one, do it on the whole basis directly
                 # try on whole basis
                 # fix not same name for avoid R_np error in the loop after this test (if it's not the right one)
+                if data is None:
+                    data = precompute_nearest_plane(R)
+
                 y = QT @ cp.asarray(t)
                 U = cp.empty_like(y)
                 nearest_plane_gpu(R, y[:, None], U[:, None], *data)
