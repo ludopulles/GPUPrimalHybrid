@@ -243,7 +243,7 @@ def svp_babai_fp64_nr_projected(
         B = IntegerMatrix.from_matrix(basis)
         v = t - np.array(CVP.babai(B, t), dtype=np.int64)
         t_fplll = time.time() - t_fplll
-        print("FPLLL invocation took {t_fplll:.2f} seconds.", flush=True)
+        print(f"FPLLL invocation took {t_fplll:.2f} seconds.", flush=True)
 
         # print(f"Babai solution: {v} of norm {np.linalg.norm(v)}")
         if np.linalg.norm(v) <= full_norm:
@@ -322,7 +322,7 @@ def svp_babai_fp64_nr_projected(
                 v = t - np.array(CVP.babai(B, t), dtype=np.int64)
                 # print('Possible candidate: ', v, np.linalg.norm(v), 'vs', full_norm)
                 t_fplll = time.time() - t_fplll
-                print("FPLLL invocation took {t_fplll:.2f} seconds.", flush=True)
+                print(f"FPLLL invocation took {t_fplll:.2f} seconds.", flush=True)
 
                 if np.linalg.norm(v) <= full_norm:
                     # TODO: also return s_guess
