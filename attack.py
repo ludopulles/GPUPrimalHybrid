@@ -3,7 +3,6 @@
 
 import argparse
 import csv
-import gc, cupy as cp
 import numpy as np
 import os
 import psutil
@@ -15,14 +14,13 @@ import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from itertools import combinations, product
 from math import comb, floor, sqrt
-from multiprocessing import Manager, get_context
-from pathlib import Path
+from multiprocessing import get_context
 from tqdm import tqdm
 
 from sage.all import seed
 
 # Local imports
-from blaster import reduce, get_profile
+from blaster import reduce, get_profile, set_num_cores
 
 from fpylll.util import gaussian_heuristic
 from fpylll import IntegerMatrix, CVP
@@ -32,8 +30,6 @@ import attack_params
 from estimation import find_attack_parameters, output_params_info, required_iterations, error_distribution_rounding
 from instances import BaiGalCenteredScaledTernary, BaiGalModuleLWE, \
     estimate_target_upper_bound_ternary_vec, estimate_target_upper_bound_binomial_vec
-from kernel_babai import nearest_plane_gpu, __babai_ranges, _build_choose_table_dev, \
-    guess_batches_gpu, value_batches_fp32_gpu, precompute_nearest_plane
 from lwe import generate_CBD_MLWE, generate_ternary_MLWE, MLWE_to_LWE, bai_galbraith_embedding, \
     select_samples, RoundedDownLWE
 
@@ -196,8 +192,12 @@ def svp(
 
 def svp_babai_fp64_nr_projected(
     basis, eta, columns_dropped, columns_to_keep, A, b_vec, n, k, m, q,
-    secret_nonzero_support, w_guess, e_stddev, kannan_coeff, report_progress=False
+    secret_nonzero_support, w_guess, e_stddev, kannan_coeff, verbose=False
 ):
+    import cupy as cp
+    from kernel_babai import nearest_plane_gpu, _build_choose_table_dev, guess_batches_gpu, \
+        value_batches_fp32_gpu, precompute_nearest_plane
+
     basis_gpu = cp.asarray(basis.T, dtype=cp.float64, order="F")  # B_red (column notation)
 
     b_host = np.array(b_vec.list()[:m], dtype=np.int64)  # b
@@ -271,7 +271,7 @@ def svp_babai_fp64_nr_projected(
 
             num_done += batch_size
             percentage = round(float(100.0 * num_done) / num_guesses)
-            if report_progress:
+            if verbose:
                 print(f"\rBabai-NP: {num_done:6d}/{num_guesses:6d} ({percentage:3d}%)", end="", flush=True)
 
             guess_batch = A_guess_gpu[:, guess_idx]  # (m, idx_size, w_guess)
@@ -324,7 +324,7 @@ def svp_babai_fp64_nr_projected(
 
                 if np.linalg.norm(v) <= full_norm:
                     # TODO: also return s_guess
-                    if report_progress:
+                    if verbose:
                         print(f"\rBabai-NP: success at {percentage:3d}%                    ", flush=True)
                     target = np.concatenate((v, [kannan_coeff]))
                     return target
@@ -341,13 +341,13 @@ def svp_babai_fp64_nr_projected(
                 v = t + cp.asnumpy(basis_gpu @ U)
                 v = (np.rint(v)).astype(np.int64)
                 if np.linalg.norm(v) <= full_norm:
-                    if report_progress:
+                    if verbose:
                         print(f"\rBabai-NP: success at {percentage:3d}%                    ", flush=True)
                     target = np.concatenate((v, [kannan_coeff]))
                     return target
                 # print(f"Discarding guess: full norm is {np.linalg.norm(v):.3f} > {full_norm:.3f}")
     # No solution found.
-    if report_progress:
+    if verbose:
         print(f"\rBabai-NP: unsuccessful                    ", flush=True)
     return None
 
@@ -372,21 +372,18 @@ def generate_LWE_instance(params, _seed=None):
             raise ValueError(f"Unknown secret type: {params['secret_type']}")
 
     lwe = MLWE_to_LWE(*lwe)
-
-    A_, b_, s_, e_ = map(lambda x: np.array(x, dtype=np.int64), lwe)
-    assert (b_ == (s_ @ A_ + e_) % params['q']).all(), "LWE instance is invalid"
-
+    # A_, b_, s_, e_ = map(lambda x: np.array(x, dtype=np.int64), lwe)
+    # assert (b_ == (s_ @ A_ + e_) % params['q']).all(), "LWE instance is invalid"
     print(f"LWE instance is generated using seed {_seed}.")
 
+    # Limit to `m` samples already.
     lwe = select_samples(*lwe, params['m'])
 
     if 'p' in params:
         # Rounding down...
         lwe = RoundedDownLWE(lwe, params['q'], params['p'])
-
-        # Check new instance.
-        A_, b_, s_, e_ = map(lambda x: np.array(x, dtype=np.int64), lwe)
-        assert (b_ == (s_ @ A_ + e_) % params['p']).all(), "LWE instance is invalid"
+        # A_, b_, s_, e_ = map(lambda x: np.array(x, dtype=np.int64), lwe)
+        # assert (b_ == (s_ @ A_ + e_) % params['p']).all(), "LWE instance is invalid"
     return lwe
 
 
@@ -415,7 +412,7 @@ def drop_and_solve(lwe, params, iteration, verbose=False):
     columns_dropped, columns_to_keep = pick_columns(N, k, _seed=iteration)
 
     return solve_guess(
-        lwe, params, iteration, columns_dropped, columns_to_keep, report_progress=verbose)
+        lwe, params, iteration, columns_dropped, columns_to_keep, verbose=verbose)
 
 
 def drop_and_solve_correct_guess(lwe, params, iteration):
@@ -444,11 +441,11 @@ def drop_and_solve_correct_guess(lwe, params, iteration):
 
     __s_guess = np.array(__s, dtype=np.int64)[drop]
     assert np.count_nonzero(__s_guess) == w_guess
-    return solve_guess(lwe, params, iteration, drop, keep, report_progress=True)
+    return solve_guess(lwe, params, iteration, drop, keep, verbose=True)
 
 
 
-def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, report_progress=False):
+def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, verbose=False):
     # LWE parameters:
     q, w = params["q"], params["w"]
     N = params["n"] * params.get("k_dim", 1)
@@ -467,15 +464,17 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, report
     w_guess = params["h_"]  # weight of secret guess
 
     secret_nonzero_support = list(range(-eta, 0)) + list(range(1, eta + 1))
-
-    A, __b, __s, __e = lwe
+    A = lwe[0]
 
     # DEBUGGING PART (MAKES USE OF SECRET):
     # TODO: remove this code section
+    __s = lwe[2]  # A, b, s, e
     __s_guess = np.array(__s, dtype=np.int64)[columns_dropped]
     if np.count_nonzero(__s_guess) == w_guess:
-        print(f"Iteration #{iteration}: contains correct guess: {__s_guess[np.nonzero(__s_guess)]} at {np.nonzero(__s_guess)[0]}", flush=True)
-    del(__s_guess)  # END OF DEBUGGING PART
+        nonzeros = np.nonzero(__s_guess)
+        print(f"Iteration #{iteration}: contains correct guess: {__s_guess[nonzeros]}"
+              f" at {nonzeros[0]} ~{round(100.0*nonzeros[0][0]/len(columns_dropped)):3d}%", flush=True)
+    del __s_guess  # END OF DEBUGGING PART
 
     if is_binomial:
         e_stddev = sqrt(eta/2)
@@ -490,10 +489,10 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, report
         s_stddev = 1 * sqrt((w - w_guess) / (N - k))
 
     # Build the embedding
-    if "p" in params: # Rounding down
+    if "p" in params:
+        # Round instance down
         q = int(params['p'])
         e_stddev = error_distribution_rounding(params)
-        print(f"Rounding down to p={q}")
     
     basis, b_vec, __target = bai_galbraith_embedding(
         N, q, w, lwe, k, m, s_stddev, e_stddev, columns_to_keep
@@ -504,7 +503,7 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, report
     basis = basis.delete_columns([basis.ncols() - 1])
 
     t1 = time.time()
-    reduced_basis = BKZ_reduce(basis, beta, verbose=report_progress)
+    reduced_basis = BKZ_reduce(basis, beta, verbose=verbose)
     t2 = time.time()
 
     if eta_svp == 2:
@@ -513,7 +512,7 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, report
         target = svp_babai_fp64_nr_projected(
             reduced_basis, eta_svp, columns_dropped, columns_to_keep, A, b_vec, N,
             k, m, q, secret_nonzero_support, w_guess, e_stddev, kannan_coeff,
-            report_progress=report_progress
+            verbose=verbose
         )
     else:
         # reappend with the tau to call the svp (not for babai)
@@ -524,7 +523,7 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, report
         )
         target = svp_result[0]
 
-    if report_progress:
+    if verbose:
         t3 = time.time()
         BKZs, NPs, tot = t2 - t1, t3 - t2, t3 - t1
         print(f"Time spent on BKZ / Babai: {tot:.2f}s ({round(100*BKZs/tot):d}% vs {round(100*NPs/tot):d}%)")
@@ -559,38 +558,35 @@ def _setup_process(lwe, params, gpu_id, num_cores):
     global shared_lwe, shared_params, shared_gpu
     shared_lwe, shared_params, shared_gpu = lwe, params, gpu_id
 
+    # Make sure OpenMP & Eigen use this many cores.
+    set_num_cores(num_cores)
+
+    # Also configure the environment for this many cores.
     num_cores = str(num_cores)
     os.environ["OPENBLAS_NUM_THREADS"] = num_cores
     os.environ["MKL_NUM_THREADS"] = num_cores
     os.environ["OMP_NUM_THREADS"] = num_cores
+    os.environ["VECLIB_MAXIMUM_THREADS"] = num_cores
     os.environ["NUMEXPR_NUM_THREADS"] = num_cores
     # (optional) stabilize OpenMP
     os.environ.setdefault("MKL_DYNAMIC", "FALSE")
     os.environ.setdefault("OMP_PROC_BIND", "close")
     os.environ.setdefault("OMP_PLACES", "cores")
 
-    ## TODO: This does not seem to work: paul: (it works only if you don't import cupy before see attack_reduce_vram.py)
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)  # remap in device 0
+
+    # Only now load CuPy so only GPU#gpu_id is used.
+    import cupy as cp
+    cp.cuda.Device(0)
 
     # set CPU affinity
     # os.sched_setaffinity(0, num_cores)
 
 
-# def worker(start, stop, params, gpu_id, num_cores):
 def worker(it, verbose):
-    global shared_lwe, shared_params, shared_gpu
-    # _init_worker(gpu_id, num_cores)
-
-    #np.set_printoptions(linewidth=10000, threshold=2147483647, suppress=True)
-    #cp.set_printoptions(linewidth=10000, threshold=2147483647, suppress=True)
-    #np.set_printoptions(formatter={'float': lambda x: "{0:0.3f}".format(x)}, precision=3)
-    #cp.set_printoptions(formatter={'float': lambda x: "{0:0.3f}".format(x)}, precision=3)
-
-    # print(f"Worker on GPU#{shared_gpu} has range {start}--{stop}")
-    with cp.cuda.Device(shared_gpu):  # Only one GPU per worker
-        return drop_and_solve(shared_lwe, shared_params, it, verbose)
-
+    global shared_lwe, shared_params
+    return drop_and_solve(shared_lwe, shared_params, it, verbose)
 #        for i in range(start, stop):
 #            if stop_event.is_set():
 #                # Another worker had success, abort.
@@ -602,6 +598,11 @@ def worker(it, verbose):
 #                # We were successful!
 #                return True, i - start
 #    return False, stop - start
+
+
+def do_correct_guess():
+    global shared_lwe, shared_params
+    return drop_and_solve_correct_guess(shared_lwe, shared_params, 0)
 
 
 def gpu_count():
@@ -624,6 +625,8 @@ def divide_range(n, k):
 
 
 def _pool_report(tag=""):
+    import cupy as cp
+
     free, total = cp.cuda.runtime.memGetInfo()
     used = total - free
     mp = cp.get_default_memory_pool()
@@ -633,23 +636,21 @@ def _pool_report(tag=""):
 
 # --- orchestration -----------------------------------------------------------
 def parallel_run(iterations, lwe, params, result, num_workers, only_correct_guess, verbose):
-    if only_correct_guess:
-        # Only do the 'success' run
-        t = time.time()
-        result["success"] = drop_and_solve_correct_guess(lwe, params, 0)
-        result["time_elapsed"] = time.time() - t
-        return result
-
     num_gpus = gpu_count()
     assert num_gpus >= 1
-
-    if num_workers is None:
-        num_workers = num_gpus  # Use one worker per GPU
-    if num_gpus > num_workers:
-        num_gpus = num_workers  # Use less GPUs when having few workers.
+    num_gpus = min(num_gpus, 2)
 
     # partition CPU cores:
-    num_cores = (psutil.cpu_count(logical=False) - 2) // num_workers
+    num_cores = psutil.cpu_count(logical=False) // num_workers
+
+    if only_correct_guess:
+        _setup_process(lwe, params, num_gpus - 1, num_cores)
+        t1, result["success"], t2 = time.time(), do_correct_guess(), time.time()
+        result["time_elapsed"] = t2 - t1
+        return result
+
+    # Don't use more GPUs than workers
+    num_gpus = min(num_gpus, num_workers)
 
     # cpu_sets = divide_range(psutil.cpu_count(logical=True), num_workers)
     # cpu_sets = [list(range(fr, to)) for (fr, to) in cpu_sets]
@@ -688,10 +689,7 @@ def parallel_run(iterations, lwe, params, result, num_workers, only_correct_gues
             initializer=_setup_process, initargs=(lwe, params, gpu, num_cores)
         ) for gpu in range(num_gpus)]
 
-        #executor = ProcessPoolExecutor(
-        #    max_workers=num_workers, mp_context=ctx,
-        #    initializer=_setup_process, initargs=(lwe, params),
-        #)
+        time.sleep(5)  # Create the process pool
 
         start_time = time.time()
         jobs = []
@@ -741,7 +739,7 @@ def parallel_run(iterations, lwe, params, result, num_workers, only_correct_gues
     return result
 
 
-def run_single_attack(params, run_id, num_workers, only_correct_guess=False, verbose=False):
+def run_single_attack(params, run_id, num_workers, only_correct_guess, verbose):
     result = {
         "run_id": run_id,
         "n": params["n"],
@@ -770,7 +768,7 @@ def run_single_attack(params, run_id, num_workers, only_correct_guess=False, ver
     return result
 
 
-def batch_attack(output_csv, num_workers, runs, only_correct_guess, verbose=False):
+def batch_attack(output_csv, num_workers, runs, only_correct_guess, verbose):
     if runs == 0:
         for params in attack_params.atk_params:
             params_ = find_attack_parameters(params)
