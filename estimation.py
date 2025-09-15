@@ -31,7 +31,8 @@ def mu2(eta):
 
 def error_distribution_rounding(params):
     """
-    Estimate the standard deviation of the error after modulus switching. (assume that p/q sigma_error is small enough)
+    Estimate the standard deviation of the error after modulus switching.
+    Add the (p/q)*Xe term to the variance for avoid errors in the estimation even if the parameter p is close to q.
     """
     if "p" not in params:
         # Raise an error if it does not make sense to call this function
@@ -39,11 +40,72 @@ def error_distribution_rounding(params):
 
     q, p = params["q"], params["p"]
     if params["secret_type"] == "binomial":
-        new_variance = (1 + mu2(params["eta"])*(params["w"]))/12.0
+        new_variance = (1 + mu2(params["eta"])*(params["w"]))/12.0 + ((p/q)*sqrt(params["eta"]/2.0))**2
     else:
-        new_variance = (1 + (params["w"]))/12.0
+        new_variance = (1 + (params["w"]))/12.0 + ((p/q)*params["lwe_sigma"])**2
     return sqrt(new_variance)
 
+def error_distribution_rounding_upper_bound(params):
+    """
+    Upper bound on the standard deviation of the error after modulus switching.
+    """
+    if "p" not in params:
+        # Raise an error if it does not make sense to call this function
+        raise ValueError("Modulus switching not applied, 'p' not in params")
+    q, p = params["q"], params["p"]
+    if params["secret_type"] == "binomial":
+        new_variance = (1 + ((params["eta"])**2)*(params["w"]))/12.0 + ((p/q)*sqrt(params["eta"]/2.0))**2
+    else:
+        new_variance = (1 + (params["w"]))/12.0 + ((p/q)*params["lwe_sigma"])**2
+    return sqrt(new_variance)
+
+def find_optimal_projection_dimension(R22, G, sigma, k=1, alpha=0.01):
+    """
+    Find the optimal projection dimension d that balances false positives and true positives.
+    
+    Parameters:
+    - R22: R22 matrix (lower-right block of R from QR decomposition)
+    - G: number of incorrect guesses
+    - sigma: standard deviation of the noise
+    - k: maximum expected number of false positives (default: 1)
+    - alpha: probability of missing the true positive (default: 0.01)
+    
+    Returns:
+    - d: optimal projection dimension
+    - tau: corresponding threshold
+    """
+    from math import sqrt
+    from scipy.stats import chi2
+    from fpylll.util import gaussian_heuristic
+    import numpy as np
+    
+    def true_positive_threshold(d, sigma, alpha):
+        """Compute threshold to capture true positive with probability 1-alpha"""
+        quantile = chi2.ppf(1 - alpha, d)
+        return sigma * sqrt(quantile)
+    
+    max_d = R22.shape[0]
+    
+    # Search for optimal dimension starting from small values
+    for d in range(1, max_d + 1):
+        # Extract squared norms for the last d dimensions
+        rr = [R22[i, i]**2 for i in range(max_d - d, max_d)]
+        
+        # Use fpylll's gaussian_heuristic
+        r_gh = sqrt(gaussian_heuristic(rr))
+        
+        # False positive threshold: τ ≤ r_GH * (k/G)^(1/d)
+        tau_fp = r_gh * ((k / G) ** (1.0 / d))
+        
+        # True positive threshold
+        tau_tp = true_positive_threshold(d, sigma, alpha)
+        
+        # We need tau_tp <= tau_fp for the dimension to be feasible
+        if tau_tp <= tau_fp:
+            return d, min(tau_tp, tau_fp)
+    
+    d = max_d
+    return d, true_positive_threshold(d, sigma, alpha)
 
 def find_attack_parameters(params):
     # Find attack parameters:
@@ -58,15 +120,15 @@ def find_attack_parameters(params):
         Xs = ND.SparseTernary(params["w"] // 2, (params["w"] + 1) // 2)
         Xe = ND.DiscreteGaussian(params["lwe_sigma"])
     if "p" in params:
-        print(f"Modulus-switching ({params['q']} > {q}): e_stddev ~ {Xe.stddev}")
         Xe = ND.DiscreteGaussian(error_distribution_rounding(params))
+        print(f"Modulus-switching ({params['q']} > {q}): e_stddev ~ {Xe.stddev}")
 
-    lwe_params = LWE.Parameters(n=N, q=q, Xs=Xs, Xe=Xe)
+    lwe_params = LWE.Parameters(n=N, q=q, Xs=Xs, Xe=Xe, m=params["n"])
 
     if not all(key in params for key in ['beta', 'eta_svp', 'm', 'k', 'h_']):
         print("Computing the best attack parameters...", flush=True)
         cost = LWE.primal_hybrid(lwe_params, babai=True, mitm=False)
-        cost["m"] = min(cost["d"] - (N - cost["zeta"]), params["n"])
+        cost["m"] = cost["d"] - (N - cost["zeta"]) # it min n because we set in LWE.Parameters m = n (see if needed or we can get more samples) in Facebook paper is 4n samples
         print(cost)
 
         params |= {

@@ -20,19 +20,20 @@ from tqdm import tqdm
 from sage.all import seed
 
 # Local imports
-from blaster import reduce, get_profile, set_num_cores
+from blaster import reduce, get_profile, slope, rhf, set_num_cores
 
 from fpylll.util import gaussian_heuristic
 from fpylll import IntegerMatrix, CVP
 
 # In this directory
 import attack_params
-from estimation import find_attack_parameters, output_params_info, required_iterations, error_distribution_rounding
+from estimation import find_attack_parameters, output_params_info, required_iterations, error_distribution_rounding, error_distribution_rounding_upper_bound
 from instances import BaiGalCenteredScaledTernary, BaiGalModuleLWE, \
     estimate_target_upper_bound_ternary_vec, estimate_target_upper_bound_binomial_vec
 from lwe import generate_CBD_MLWE, generate_ternary_MLWE, MLWE_to_LWE, bai_galbraith_embedding, \
     select_samples, RoundedDownLWE
 
+import matplotlib.pyplot as plt
 
 def BKZ_reduce(basis, beta, verbose=False):
     B, B_red, U = np.ascontiguousarray(np.array(basis, dtype=np.int64).T), None, None
@@ -45,9 +46,9 @@ def BKZ_reduce(basis, beta, verbose=False):
     elif beta < 60:  # BKZ-enum
         U, B_red, _ = reduce(B, beta=beta, bkz_size=80, **kwargs)
     elif beta <= 80:  # BKZ-G6K + jumps
-        U, B_red, _ = reduce(B, beta=beta, g6k_use=True, bkz_size=beta + 20, jump=21, **kwargs)
+        U, B_red, _ = reduce(B, beta=beta, g6k_use=True, g6k_prog=True, bkz_size=beta + 20, jump=21, **kwargs)
     else:  # BKZ-G6K + small jumps
-        U, B_red, _ = reduce(B, beta=beta, g6k_use=True, bkz_size=beta + 2, jump=2, **kwargs)
+        U, B_red, _ = reduce(B, beta=beta, g6k_use=True, g6k_prog=True, bkz_size=beta + 2, jump=2, **kwargs)
 
     # assert (B_red == B @ U).all()
     return B_red.T
@@ -197,6 +198,7 @@ def svp_babai_fp64_nr_projected(
     import cupy as cp
     from kernel_babai import nearest_plane_gpu, _build_choose_table_dev, guess_batches_gpu, \
         value_batches_fp32_gpu, precompute_nearest_plane
+    from estimation import find_optimal_projection_dimension
 
     basis_gpu = cp.asarray(basis.T, dtype=cp.float64, order="F")  # B_red (column notation)
 
@@ -212,7 +214,16 @@ def svp_babai_fp64_nr_projected(
 
     # Execute Babai's Nearest Plane Algorithm using the last `babai_dim`
     # Gram--Schmidt vectors of the basis.
-    babai_dim = m  # TODO: make this adjustable...
+    G = comb(k, w_guess) * (len(secret_nonzero_support) ** w_guess)  # number of incorrect guesses
+    R22 = cp.asnumpy(R[-m:, -m:])
+    optimal_d, optimal_tau = find_optimal_projection_dimension(
+        R22, G, e_stddev, k=(1/100), alpha=0.001
+    )
+    babai_dim = min(optimal_d, m)
+
+    if verbose:
+        print(f"Optimal projection dimension: {optimal_d}, using: {babai_dim}")
+        print(f"Optimal threshold: {optimal_tau:.4f}")
 
     # Select first `m` rows, because that's where b is nonzero.
     # Select last `babai_dim` columns, because that's where we perform Babai.
@@ -222,8 +233,9 @@ def svp_babai_fp64_nr_projected(
     # setup variables for Babai Nearest Plane:
     data_np, data = precompute_nearest_plane(R_np), None
 
-    full_sqnorm, proj_sqnorm = 2 * e_stddev**2 * (m + n - k), 2 * e_stddev**2 * babai_dim
-    full_norm, proj_norm = sqrt(full_sqnorm), sqrt(proj_sqnorm)
+    full_sqnorm = 2 * e_stddev**2 * (m + n - k)
+    proj_sqnorm = optimal_tau**2  # Use optimal threshold
+    full_norm, proj_norm = sqrt(full_sqnorm), optimal_tau
 
     y0 = QT_np @ b_gpu  # y0 = Q^T b
     U = cp.empty_like(y0)
@@ -252,7 +264,7 @@ def svp_babai_fp64_nr_projected(
     GUESS_BATCH = 1024 * 4
     VALUE_BATCH = 512
 
-    num_guesses, num_done = comb(k, w_guess) * w_guess**len(secret_nonzero_support), 0
+    num_done = 0
 
     choose_dev = _build_choose_table_dev(k, w_guess + 1)  # Table of (k choose i)'s (i <= w_guess)
     vals_dev = cp.asarray(secret_nonzero_support, dtype=cp.float32)
@@ -268,11 +280,10 @@ def svp_babai_fp64_nr_projected(
             idx_size = guess_idx.shape[0]  # assert idx_size <= GUESS_BATCH
             # dimensions of guess_idx: idx_size x w_guess
             batch_size = idx_size * val_size
-
-            num_done += batch_size
-            percentage = round(float(100.0 * num_done) / num_guesses)
             if verbose:
-                print(f"\rBabai-NP: {num_done:6d}/{num_guesses:6d} ({percentage:3d}%)", end="", flush=True)
+                num_done += batch_size
+                percentage = round(float(100.0 * num_done) / G)
+                print(f"\rBabai-NP: {num_done:6d}/{G:6d} ({percentage:3d}%)", end="", flush=True)
 
             guess_batch = A_guess_gpu[:, guess_idx]  # (m, idx_size, w_guess)
             guess_batch = guess_batch.reshape(m * idx_size, w_guess)  # all columns of A^T concatenated
@@ -443,7 +454,56 @@ def drop_and_solve_correct_guess(lwe, params, iteration):
     assert np.count_nonzero(__s_guess) == w_guess
     return solve_guess(lwe, params, iteration, drop, keep, verbose=True)
 
+def plot_superposed_from_file_and_basis(
+    beta,
+    n,
+    reduced_basis,
+    prof_from_get_profile=None,
+    scaling_factor_y=1,
+    prof_form="log2_norm",
+    dirpath="saved_profiles",
+    fname_tpl="prof_b{beta}_n{n}.npy",
+    title_extra=None,
+):
+    """
+    Load reduced_profile/prof_{beta}_{n}.npy (assumed in log2),
+    convert the measured 'prof' to the same log2 format, and plot the overlay.
+    """
+    path = os.path.join(dirpath, fname_tpl.format(beta=beta, n=n))
+    r_file_log2 = (np.load(path)) / 2
+    d_file = len(r_file_log2)
 
+    r_meas_log2 = prof_from_get_profile - np.log2(
+        scaling_factor_y
+    )  # maybe to be squared
+    d_meas = len(r_meas_log2)
+
+    d = min(d_file, d_meas)
+    if d_file != d_meas:
+        print(
+            f"[warn] size mismatch: file={d_file}, measured={d_meas}. Truncating to {d}."
+        )
+
+    # plot
+    i = np.arange(1, d + 1)
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.plot(i, r_file_log2[:d], lw=1.8, label=f"saved: prof_{beta}_{n}.npy (log2)")
+    ax.plot(i, r_meas_log2[:d], lw=1.6, label="measured reduced_basis (log2)")
+              
+    ax.set_xlabel("index i")
+    ax.set_ylabel("log2")
+    ttl = f"Basis profile superposition — β={beta}, n={n}"
+    if title_extra:
+        ttl += f" — {title_extra}"
+    ax.set_title(ttl)
+    ax.grid(True, which="both", linestyle=":", alpha=0.6)
+    ax.legend()
+    plt.tight_layout()
+    #save to file
+    os.makedirs(dirpath, exist_ok=True)
+    figpath = os.path.join(dirpath, f"prof_superposed_b{beta}_n{n}.png")
+    fig.savefig(figpath)
+    plt.close(fig)
 
 def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, verbose=False):
     # LWE parameters:
@@ -506,9 +566,19 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, verbos
     reduced_basis = BKZ_reduce(basis, beta, verbose=verbose)
     t2 = time.time()
 
+    if verbose:
+        plot_superposed_from_file_and_basis(
+            beta,
+            N,
+            reduced_basis.T,
+            prof_from_get_profile=get_profile(reduced_basis.T)
+        ) # appear in dir saved_profiles/
+
     if eta_svp == 2:
         # Guess where the nonzero entries in s_{guess} are, and
         # check whether the corresponding target b - A_g s_g is a BDD instance using Babai NP.
+        if "p" in params:
+            e_stddev = error_distribution_rounding_upper_bound(params)
         target = svp_babai_fp64_nr_projected(
             reduced_basis, eta_svp, columns_dropped, columns_to_keep, A, b_vec, N,
             k, m, q, secret_nonzero_support, w_guess, e_stddev, kannan_coeff,
@@ -645,9 +715,13 @@ def parallel_run(iterations, lwe, params, result, num_workers, only_correct_gues
 
     if only_correct_guess:
         _setup_process(lwe, params, num_gpus - 1, num_cores)
-        t1, result["success"], t2 = time.time(), do_correct_guess(), time.time()
-        result["time_elapsed"] = t2 - t1
-        return result
+        while True:
+            t1, result["success"], t2 = time.time(), do_correct_guess(), time.time()
+            result["time_elapsed"] = t2 - t1
+            if result["success"]:
+                return result
+            else:
+                print("Didn't find it, retrying...", flush=True)
 
     # Don't use more GPUs than workers
     num_gpus = min(num_gpus, num_workers)
