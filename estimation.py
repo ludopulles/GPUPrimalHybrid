@@ -138,7 +138,8 @@ def find_attack_parameters(params):
     else:
         print("Recomputing cost: ", flush=True)
         cost = LWE.primal_hybrid.cost(
-            params['beta'], lwe_params, params['k'], babai=True, mitm=False, m = params['m'] + N
+            params['beta'], lwe_params, params['k'], babai=True, mitm=False, m = params['m'] + N,
+            hw=params['h_']
         )
         print(cost)
     return params

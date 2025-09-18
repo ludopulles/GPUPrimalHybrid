@@ -22,8 +22,8 @@ conda activate "${ENV_NAME}"
 # Array of repositories to clone
 REPOS=(
   "https://github.com/plvie/G6K-GPU-Tensor.git"
-  "https://github.com/plvie/lattice-estimator.git"
-  "https://github.com/plvie/BLASter.git"
+  "https://github.com/ludopulles/lattice-estimator.git"
+  "https://github.com/ludopulles/cuBLASter.git"  #(private)
 )
 
 echo "Cloning repositories..."
@@ -31,9 +31,10 @@ for REPO in "${REPOS[@]}"; do
   git clone "$REPO"
 done
 
-# Install lattice-estimator and BLASter in editable mode
+# Install lattice-estimator
 echo "Installing lattice-estimator in editable mode..."
 pushd lattice-estimator >/dev/null
+git checkout gpu-primal-hybrid  # Switch to this branch.
 pip install -e .
 popd >/dev/null
 
@@ -43,6 +44,7 @@ pushd G6K-GPU-Tensor >/dev/null
 ./rebuild.sh -f -y
 popd >/dev/null
 
+# Install BLASter in editable mode
 echo "Installing BLASter in editable mode..."
 pushd BLASter >/dev/null
 pip install -e .
