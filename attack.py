@@ -257,6 +257,10 @@ def svp_babai_fp64_nr_projected(
     choose_dev = _build_choose_table_dev(k, w_guess + 1)  # Table of (k choose i)'s (i <= w_guess)
     vals_dev = cp.asarray(secret_nonzero_support, dtype=cp.float32)
 
+    # Compute things in the Gram--Schmidt basis.
+    gs_b = QT_np @ b_gpu
+    gs_A = QT_np @ A_guess_gpu
+
     for guess_val in value_batches_fp32_gpu(vals_dev, w_guess, VALUE_BATCH):
         # Enumerate all possible values v_1, ... v_{w_guess} \in secret_nonzero_support.
         val_size = guess_val.shape[1]
@@ -274,15 +278,20 @@ def svp_babai_fp64_nr_projected(
             if verbose:
                 print(f"\rBabai-NP: {num_done:6d}/{num_guesses:6d} ({percentage:3d}%)", end="", flush=True)
 
-            guess_batch = A_guess_gpu[:, guess_idx]  # (m, idx_size, w_guess)
-            guess_batch = guess_batch.reshape(m * idx_size, w_guess)  # all columns of A^T concatenated
-            guess_batch = (guess_batch @ guess_val.astype(cp.float64)).reshape(m, batch_size)  # A s_g
+            # guess_batch = A_guess_gpu[:, guess_idx]  # (m, idx_size, w_guess)
+            # guess_batch = guess_batch.reshape(m * idx_size, w_guess)  # all columns of A^T concatenated
+            # guess_batch = (guess_batch @ guess_val.astype(cp.float64)).reshape(m, batch_size)  # A s_g
+            # # Make copies of b:
+            # bs_gpu = cp.broadcast_to(b_gpu[:, None], (m, batch_size)) - guess_batch
+            # bs_gpu %= q
+            # Y = QT_np @ bs_gpu  # Q^T (b - A_g s_g)
 
-            # Make copies of b:
-            bs_gpu = cp.broadcast_to(b_gpu[:, None], (m, batch_size)) - guess_batch
-            bs_gpu %= q
+            Y = gs_A[:, guess_idx]
+            Y = Y.reshape(babai_dim * idx_size, w_guess)
+            Y @= guess_val.astype(cp.float64)
+            Y = -Y.reshape(babai_dim, batch_size)
+            Y += cp.broadcast_to(gs_b[:, None], (babai_dim, batch_size))
 
-            Y = QT_np @ bs_gpu  # Q^T (b - A_g s_g)
             U = cp.empty((babai_dim, batch_size), dtype=cp.float64)
             nearest_plane_gpu(R_np, Y, U, *data_np)
 
@@ -298,40 +307,16 @@ def svp_babai_fp64_nr_projected(
             for i in range(idx.size):
                 idx_t = int(idx[i].get())
 
-                # print('possible error: ', cp.rint(Y[:, idx_t]))
-                # print(f"Guessing values {guess_val[:, idx_t % val_size]} at {guess_idx[idx_t // val_size]}")
+                # t = np.concatenate((cp.asnumpy(bs_gpu[:, idx_t]), np.zeros(n-k)))
 
-                # U_full = cp.zeros((basis_gpu.shape[0]), dtype=U.dtype, order="F")
-                # U_full[-babai_dim:] = U[:, idx_t]
-                # g_idx, b_idx = idx_t // val_size, idx_t % val_size
-                # id_subset = guess_idx[g_idx]
-                # vals_d = guess_val[:, b_idx]
-                # A_rm_sub = cp.asarray(A_guess[:, cp.asnumpy(id_subset)], dtype=cp.float64)
-                # print('Compare: ', A_rm_sub @ vals_d, 'with', guess_batch[:, idx_t])
-                # assert (A_rm_sub @ vals_d) == 
-                # b_try = b_host[:-1].copy()
-                # b_try[-m:] -= cp.asnumpy((A_rm_sub @ vals_d).astype(cp.int64))
-                # print('b: ', bs_gpu[:, idx_t])
-                t = np.concatenate((cp.asnumpy(bs_gpu[:, idx_t]), np.zeros(n-k)))
-                t = np.rint(t).astype(np.int64)
+                g_idx, v_idx = idx_t // val_size, idx_t % val_size
+                raw_target = b_gpu - A_guess_gpu[:, guess_idx[g_idx]] @ guess_val[:, v_idx]
+                raw_target %= q
+                t = np.concatenate((cp.asnumpy(raw_target), np.zeros(n-k)))
+                # t = np.rint(t).astype(np.int64)
 
-                t_fplll = time.time()
-                B = IntegerMatrix.from_matrix(basis)
-                v = t - np.array(CVP.babai(B, t), dtype=np.int64)
-                # print('Possible candidate: ', v, np.linalg.norm(v), 'vs', full_norm)
-                t_fplll = time.time() - t_fplll
-                print(f"FPLLL invocation took {t_fplll:.2f} seconds.", flush=True)
-
-                if np.linalg.norm(v) <= full_norm:
-                    # TODO: also return s_guess
-                    if verbose:
-                        print(f"\rBabai-NP: success at {percentage:3d}%                    ", flush=True)
-                    target = np.concatenate((v, [kannan_coeff]))
-                    return target
-
-                # if CVP babai didn't find it give the right one, do it on the whole basis directly
-                # try on whole basis
-                # fix not same name for avoid R_np error in the loop after this test (if it's not the right one)
+                # Given this candidate, try Babai on the whole basis.
+                # 1) using nearest_plane_gpu:
                 if data is None:
                     data = precompute_nearest_plane(R)
 
@@ -345,7 +330,22 @@ def svp_babai_fp64_nr_projected(
                         print(f"\rBabai-NP: success at {percentage:3d}%                    ", flush=True)
                     target = np.concatenate((v, [kannan_coeff]))
                     return target
+
+                # 2) using FPLLL's CVP.babai
+                t_fplll = time.time()
+                B = IntegerMatrix.from_matrix(basis)
+                v = t - np.array(CVP.babai(B, t), dtype=np.int64)
+                t_fplll = time.time() - t_fplll
+                print(f"FPLLL invocation took {t_fplll:.2f} seconds.", flush=True)
+
+                if np.linalg.norm(v) <= full_norm:
+                    if verbose:
+                        print(f"\rBabai-NP: success at {percentage:3d}%                    ", flush=True)
+                    target = np.concatenate((v, [kannan_coeff]))
+                    return target  # TODO: also return s_guess
+
                 # print(f"Discarding guess: full norm is {np.linalg.norm(v):.3f} > {full_norm:.3f}")
+
     # No solution found.
     if verbose:
         print(f"\rBabai-NP: unsuccessful                    ", flush=True)
