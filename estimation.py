@@ -128,7 +128,7 @@ def find_attack_parameters(params):
     if not all(key in params for key in ['beta', 'eta_svp', 'm', 'k', 'h_']):
         print("Computing the best attack parameters...", flush=True)
         cost = LWE.primal_hybrid(lwe_params, babai=True, mitm=False)
-        cost["m"] = cost["d"] - (N - cost["zeta"]) # it min n because we set in LWE.Parameters m = n (see if needed or we can get more samples) in Facebook paper is 4n samples
+        cost["m"] = cost["d"] - (N - cost["zeta"]) - 1
         print(cost)
 
         params |= {
