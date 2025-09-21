@@ -25,14 +25,43 @@ def type_ternary(lwe_sigma=3.19):
 
 
 atk_params = [
+    # Test instances
+    # type_binomial(2, 1) | {'n': 64, 'q': 179067461, 'w': 10, 'beta': 40, 'eta_svp': 2, 'm': 64, 'k': 30, 'h_': 4},
+    # type_binomial(2, 2) | {'n': 128, 'q': 179067461, 'w': 20, 'beta': 40, 'eta_svp': 2, 'm': 128, 'k': 120, 'h_': 3},
+
     # Binomial
-    #type_binomial(2, 2) | {'n': 256, 'q':        3329, 'w': 11, 'beta': 42, 'eta_svp': 2, 'm': 68, 'k': 402, 'h_': 2},
-    # type_binomial(2, 2) | {'n': 256, 'q':   179067461, 'w': 25},
-    # type_binomial(2, 3) | {'n': 256, 'q': 34088624597, 'w': 19, },
+    #type_binomial(2, 2) | {'n': 256, 'q': 3329, 'w': 7},
+    #type_binomial(2, 2) | {'n': 256, 'q': 3329, 'w': 8},
+    #type_binomial(2, 2) | {'n': 256, 'q': 3329, 'w': 9},
+    #type_binomial(2, 2) | {'n': 256, 'q': 3329, 'w': 10},
+    type_binomial(2, 2) | {'n': 256, 'q': 3329, 'w': 11},
+
+    type_binomial(2, 2) | {'n': 256, 'q':   179067461, 'w': 19},
+    #type_binomial(2, 2) | {'n': 256, 'q':   179067461, 'w': 20},
+    #type_binomial(2, 2) | {'n': 256, 'q':   179067461, 'w': 21},
+    #type_binomial(2, 2) | {'n': 256, 'q':   179067461, 'w': 24},
+    #type_binomial(2, 2) | {'n': 256, 'q':   179067461, 'w': 25},
+
+    type_binomial(2, 3) | {'n': 256, 'q': 34088624597, 'w': 16},
+    #type_binomial(2, 3) | {'n': 256, 'q': 34088624597, 'w': 17},
+    #type_binomial(2, 3) | {'n': 256, 'q': 34088624597, 'w': 18},
+    #type_binomial(2, 3) | {'n': 256, 'q': 34088624597, 'w': 19},
+    #type_binomial(2, 3) | {'n': 256, 'q': 34088624597, 'w': 20},
 
     # Ternary
+    #type_ternary() | {'n': 1024, 'q':        41223389, 'w':  9},
+    #type_ternary() | {'n': 1024, 'q':        41223389, 'w': 10},
     type_ternary() | {'n': 1024, 'q':        41223389, 'w': 11},
+    #type_ternary() | {'n': 1024, 'q':        41223389, 'w': 12},
+
+    type_ternary() | {'n': 1024, 'q':       274887787, 'w':  9},
+    #type_ternary() | {'n': 1024, 'q':       274887787, 'w': 10},
+    #type_ternary() | {'n': 1024, 'q':       274887787, 'w': 11},
     #type_ternary() | {'n': 1024, 'q':       274887787, 'w': 12},
+
+    type_ternary() | {'n': 1024, 'q': 607817174438671, 'w': 17},
+    #type_ternary() | {'n': 1024, 'q': 607817174438671, 'w': 18},
+    #type_ternary() | {'n': 1024, 'q': 607817174438671, 'w': 19},
     #type_ternary() | {'n': 1024, 'q': 607817174438671, 'w': 20},
 ]
 
