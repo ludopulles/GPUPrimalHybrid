@@ -670,9 +670,9 @@ def worker(it, verbose):
 #    return False, stop - start
 
 
-def do_correct_guess():
+def do_correct_guess(it):
     global shared_lwe, shared_params
-    return drop_and_solve_correct_guess(shared_lwe, shared_params, 0)
+    return drop_and_solve_correct_guess(shared_lwe, shared_params, it)
 
 
 def gpu_count():
@@ -715,13 +715,14 @@ def parallel_run(iterations, lwe, params, result, num_workers, only_correct_gues
 
     if only_correct_guess:
         _setup_process(lwe, params, num_gpus - 1, num_cores)
+        iteration = 1
         while True:
-            t1, result["success"], t2 = time.time(), do_correct_guess(), time.time()
+            t1, result["success"], t2 = time.time(), do_correct_guess(iteration), time.time()
             result["time_elapsed"] = t2 - t1
             if result["success"]:
                 return result
-            else:
-                print("Didn't find it, retrying...", flush=True)
+            print("Correct guess not found. Retrying...", flush=True)
+            iteration += 1
 
     # Don't use more GPUs than workers
     num_gpus = min(num_gpus, num_workers)
