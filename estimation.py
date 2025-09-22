@@ -59,53 +59,55 @@ def error_distribution_rounding_upper_bound(params):
         new_variance = (1 + (params["w"]))/12.0 + ((p/q)*params["lwe_sigma"])**2
     return sqrt(new_variance)
 
-def find_optimal_projection_dimension(R22, G, sigma, k=1, alpha=0.01):
+
+def find_optimal_projection_dimension(diag, G, sigma, p_fp, p_fn):
     """
     Find the optimal projection dimension d that balances false positives and true positives.
-    
+
     Parameters:
-    - R22: R22 matrix (lower-right block of R from QR decomposition)
+    - diag: diagonal of an upper triangular R obtained by QR decomposing the reduced basis.
     - G: number of incorrect guesses
     - sigma: standard deviation of the noise
-    - k: maximum expected number of false positives (default: 1)
-    - alpha: probability of missing the true positive (default: 0.01)
-    
+    - p_fp: expected number of false positives.
+            By Markov's inequality, this upper bounds probability of a false positive
+    - p_fn: probability of missing the true positive
+
     Returns:
     - d: optimal projection dimension
     - tau: corresponding threshold
     """
-    from math import sqrt
     from scipy.stats import chi2
     from fpylll.util import gaussian_heuristic
     import numpy as np
-    
-    def true_positive_threshold(d, sigma, alpha):
-        """Compute threshold to capture true positive with probability 1-alpha"""
-        quantile = chi2.ppf(1 - alpha, d)
+
+    def true_positive_threshold(d):
+        """Compute threshold to capture true positive with probability 1-p_fn"""
+        quantile = chi2.ppf(1 - p_fn, d)
         return sigma * sqrt(quantile)
-    
-    max_d = R22.shape[0]
-    
+
+    diag_sq = [x**2 for x in diag]
+    max_d = len(diag)
+
     # Search for optimal dimension starting from small values
-    for d in range(1, max_d + 1):
-        # Extract squared norms for the last d dimensions
-        rr = [R22[i, i]**2 for i in range(max_d - d, max_d)]
-        
+    # Try at least dimension 40, where GH makes some sense.
+    for d in range(40, max_d + 1):
+
         # Use fpylll's gaussian_heuristic
-        r_gh = sqrt(gaussian_heuristic(rr))
-        
+        r_gh = sqrt(gaussian_heuristic(diag_sq[max_d - d:]))
+
         # False positive threshold: τ ≤ r_GH * (k/G)^(1/d)
-        tau_fp = r_gh * ((k / G) ** (1.0 / d))
-        
-        # True positive threshold
-        tau_tp = true_positive_threshold(d, sigma, alpha)
-        
-        # We need tau_tp <= tau_fp for the dimension to be feasible
-        if tau_tp <= tau_fp:
-            return d, min(tau_tp, tau_fp)
-    
-    d = max_d
-    return d, true_positive_threshold(d, sigma, alpha)
+        tau_fp = r_gh * ((p_fp / G) ** (1.0 / d))
+
+        # norm bound giving false negatives (missing out on the correct guess) with probability p_fn.
+        tau_tp = true_positive_threshold(d)
+
+        # We need tau_tp < tau_fp for the dimension to be feasible
+        if tau_tp < tau_fp:
+            tau_mid = 0.5 * (tau_tp + tau_fp)
+            return d, tau_mid
+
+    return max_d, true_positive_threshold(max_d)
+
 
 def find_attack_parameters(params):
     # Find attack parameters:

@@ -215,15 +215,15 @@ def svp_babai_fp64_nr_projected(
     # Execute Babai's Nearest Plane Algorithm using the last `babai_dim`
     # Gram--Schmidt vectors of the basis.
     G = comb(k, w_guess) * (len(secret_nonzero_support) ** w_guess)  # number of incorrect guesses
-    R22 = cp.asnumpy(R[-m:, -m:])
-    optimal_d, optimal_tau = find_optimal_projection_dimension(
-        R22, G, e_stddev, k=(1/100), alpha=0.001
+    babai_dim, proj_norm = find_optimal_projection_dimension(
+        cp.asnumpy(cp.diag(R)), G, e_stddev, 0.001, 0.001
     )
-    babai_dim = min(optimal_d, m)
 
     if verbose:
-        print(f"Optimal projection dimension: {optimal_d}, using: {babai_dim}")
-        print(f"Optimal threshold: {optimal_tau:.4f}")
+        print(f"Running Babai-NP in dimension {babai_dim} out of original {R.shape[1]}")
+        print(f"Babai-NP norm bound: {proj_norm:.4f}")
+    proj_sqnorm = proj_norm**2
+    full_norm = sqrt(2 * e_stddev**2 * (m + n - k))
 
     # Select first `m` rows, because that's where b is nonzero.
     # Select last `babai_dim` columns, because that's where we perform Babai.
@@ -232,10 +232,6 @@ def svp_babai_fp64_nr_projected(
 
     # setup variables for Babai Nearest Plane:
     data_np, data = precompute_nearest_plane(R_np), None
-
-    full_sqnorm = 2 * e_stddev**2 * (m + n - k)
-    proj_sqnorm = optimal_tau**2  # Use optimal threshold
-    full_norm, proj_norm = sqrt(full_sqnorm), optimal_tau
 
     y0 = QT_np @ b_gpu  # y0 = Q^T b
     U = cp.empty_like(y0)
@@ -246,11 +242,12 @@ def svp_babai_fp64_nr_projected(
         t = np.concatenate((b_host, np.zeros(n - k)))
         t = np.rint(t).astype(np.int64)
 
+        print(" FPLLL call took: ", end="", flush=True)
         t_fplll = time.time()
         B = IntegerMatrix.from_matrix(basis)
         v = t - np.array(CVP.babai(B, t), dtype=np.int64)
         t_fplll = time.time() - t_fplll
-        print(f"FPLLL invocation took {t_fplll:.2f} seconds.", flush=True)
+        print(f"{t_fplll:.2f} seconds.", flush=True)
 
         # print(f"Babai solution: {v} of norm {np.linalg.norm(v)}")
         if np.linalg.norm(v) <= full_norm:
@@ -283,7 +280,7 @@ def svp_babai_fp64_nr_projected(
             if verbose:
                 num_done += batch_size
                 percentage = round(float(100.0 * num_done) / G)
-                print(f"\rBabai-NP: {num_done:6d}/{G:6d} ({percentage:3d}%)", end="", flush=True)
+                print(f"\rBabai-NP: {num_done:9d}/{G:9d} ({percentage:3d}%)", end="", flush=True)
 
             guess_batch = A_guess_gpu[:, guess_idx]  # (m, idx_size, w_guess)
             guess_batch = guess_batch.reshape(m * idx_size, w_guess)  # all columns of A^T concatenated
@@ -326,12 +323,13 @@ def svp_babai_fp64_nr_projected(
                 t = np.concatenate((cp.asnumpy(bs_gpu[:, idx_t]), np.zeros(n-k)))
                 t = np.rint(t).astype(np.int64)
 
+                print(" FPLLL call took: ", end="", flush=True)
                 t_fplll = time.time()
                 B = IntegerMatrix.from_matrix(basis)
                 v = t - np.array(CVP.babai(B, t), dtype=np.int64)
                 # print('Possible candidate: ', v, np.linalg.norm(v), 'vs', full_norm)
                 t_fplll = time.time() - t_fplll
-                print(f"FPLLL invocation took {t_fplll:.2f} seconds.", flush=True)
+                print(f"{t_fplll:.2f} seconds.", flush=True)
 
                 if np.linalg.norm(v) <= full_norm:
                     # TODO: also return s_guess
@@ -470,7 +468,10 @@ def plot_superposed_from_file_and_basis(
     convert the measured 'prof' to the same log2 format, and plot the overlay.
     """
     path = os.path.join(dirpath, fname_tpl.format(beta=beta, n=n))
-    r_file_log2 = (np.load(path)) / 2
+    try:
+        r_file_log2 = (np.load(path)) / 2
+    except FileNotFoundError:
+        return
     d_file = len(r_file_log2)
 
     r_meas_log2 = prof_from_get_profile - np.log2(
