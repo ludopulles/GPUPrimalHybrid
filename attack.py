@@ -37,7 +37,7 @@ import matplotlib.pyplot as plt
 
 def BKZ_reduce(basis, beta, verbose=False):
     B, B_red, U = np.ascontiguousarray(np.array(basis, dtype=np.int64).T), None, None
-    kwargs = {'bkz_tours': 1, 'bkz_prog': 1, 'use_seysen': True, 'verbose': verbose}
+    kwargs = {'bkz_tours': 1, 'bkz_prog': 1, 'use_seysen': True, 'verbose': False}
     if verbose:
         print(f"BKZ-{beta} reducing a rank-{B.shape[1]} basis...", flush=True)
 
@@ -50,6 +50,9 @@ def BKZ_reduce(basis, beta, verbose=False):
     else:  # BKZ-G6K + small jumps
         U, B_red, _ = reduce(B, beta=beta, g6k_use=True, g6k_prog=True, bkz_size=beta + 2, jump=2, **kwargs)
 
+    if verbose:
+        prof = get_profile(B_red)
+        print("Last lg(GS norm)s: ", ", ".join(f"{y:.1f}" for y in prof[-10:]))
     # assert (B_red == B @ U).all()
     return B_red.T
 
@@ -193,7 +196,7 @@ def svp(
 
 def svp_babai_fp64_nr_projected(
     basis, eta, columns_dropped, columns_to_keep, A, b_vec, n, k, m, q,
-    secret_nonzero_support, w_guess, e_stddev, kannan_coeff, verbose=False
+    secret_nonzero_support, w_guess, e_stddev, kannan_coeff, verbose=False, corr_val=None, corr_idx=None,
 ):
     import cupy as cp
     from kernel_babai import nearest_plane_gpu, _build_choose_table_dev, guess_batches_gpu, \
@@ -233,30 +236,17 @@ def svp_babai_fp64_nr_projected(
     # setup variables for Babai Nearest Plane:
     data_np, data = precompute_nearest_plane(R_np), None
 
-    y0 = QT_np @ b_gpu  # y0 = Q^T b
-    U = cp.empty_like(y0)
+    if verbose and corr_val is not None and corr_idx is not None:
+        b_try = b_gpu.copy()
+        As_try = A_guess_gpu[:, corr_idx].reshape(m, w_guess)
+        b_try[:m] -= (As_try @ cp.asarray(corr_val, dtype=cp.float64)).reshape(m)
 
-    nearest_plane_gpu(R_np, y0[:, None], U[:, None], *data_np)
-    if bool((cp.linalg.norm(y0) <= proj_norm).get()):
-        # Call Babai using FPyLLL:
-        t = np.concatenate((b_host, np.zeros(n - k)))
-        t = np.rint(t).astype(np.int64)
-
-        print(" FPLLL call took: ", end="", flush=True)
-        t_fplll = time.time()
-        B = IntegerMatrix.from_matrix(basis)
-        v = t - np.array(CVP.babai(B, t), dtype=np.int64)
-        t_fplll = time.time() - t_fplll
-        print(f"{t_fplll:.2f} seconds.", flush=True)
-
-        # print(f"Babai solution: {v} of norm {np.linalg.norm(v)}")
-        if np.linalg.norm(v) <= full_norm:
-            target = np.concatenate((v, [kannan_coeff]))
-            return target
-        # need to add fallback to full CVP on the whole basis if fplll don't find it (but the probability is really low to be find here)
-
-    if not w_guess:
-        return None
+        y0 = QT_np @ b_try  # y0 = Q^T b
+        U = cp.empty_like(y0)
+        nearest_plane_gpu(R_np, y0[:, None], U[:, None], *data_np)
+        l2norm = cp.linalg.norm(y0).get()
+        if verbose:
+            print(f"Babai-NP of correct guess has norm: {l2norm:.3f} (<= {proj_norm:.4f}?)")
 
     GUESS_BATCH = 1024 * 4
     VALUE_BATCH = 512
@@ -299,7 +289,6 @@ def svp_babai_fp64_nr_projected(
             #    print('Current guess: idx=', guess_idx[0, :], ' val=', guess_val[:, bid])
             #    print('target: ', bs_gpu[:, bid].T)
 
-            # idx = cp.where(cp.sum(Y * Y, axis=0) <= proj_sqnorm)[0]  # find good candidates
             cp.square(Y, out=Y)  # square inplace
             idx = cp.where(cp.sum(Y, axis=0) <= proj_sqnorm)[0]  # find good candidates
 
@@ -551,8 +540,9 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, verbos
         at_ratio = index_at_ratio(nonzeros[0], len(columns_dropped))
         print(f"Iteration #{iteration}: contains correct guess: {__s_guess[nonzeros]}"
               f" at {nonzeros[0]} ~{round(100.0 * at_ratio):3d}%", flush=True)
-        svp_babai_kwargs['corr_val'] = __s_guess[nonzeros]
-        svp_babai_kwargs['corr_idx'] = nonzeros[0]
+        if verbose:
+            svp_babai_kwargs['corr_val'] = __s_guess[nonzeros]
+            svp_babai_kwargs['corr_idx'] = nonzeros[0]
     del __s_guess  # END OF DEBUGGING PART
 
     if is_binomial:
@@ -578,6 +568,10 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, verbos
     )
     kannan_coeff = b_vec[-1]
 
+    if verbose:
+        print(f"Target norm={np.linalg.norm(__target):.2f} (err={np.linalg.norm(__target[:m]):.2f}, "
+              f"sec={np.linalg.norm(__target[m:-1]):.2f}, Kannan={kannan_coeff:d})")
+
     # delete all 0 last dimension (because no b_vec)
     basis = basis.delete_columns([basis.ncols() - 1])
 
@@ -601,7 +595,7 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, verbos
         target = svp_babai_fp64_nr_projected(
             reduced_basis, eta_svp, columns_dropped, columns_to_keep, A, b_vec, N,
             k, m, q, secret_nonzero_support, w_guess, e_stddev, kannan_coeff,
-            verbose=verbose
+            verbose=verbose, **svp_babai_kwargs
         )
     else:
         # reappend with the tau to call the svp (not for babai)
