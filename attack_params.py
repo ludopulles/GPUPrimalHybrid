@@ -51,22 +51,23 @@ atk_params = [
     # Ternary
     #type_ternary() | {'n': 1024, 'q':        41223389, 'w':  9},
     #type_ternary() | {'n': 1024, 'q':        41223389, 'w': 10},
-    type_ternary() | {'n': 1024, 'q':        41223389, 'w': 11},
+    #type_ternary() | {'n': 1024, 'q':        41223389, 'w': 11},
     #type_ternary() | {'n': 1024, 'q':        41223389, 'w': 12},
 
     type_ternary() | {'n': 1024, 'q':       274887787, 'w':  9},
+        #|  {'beta': 50, 'eta_svp': 2, 'm': 241, 'k': 748, 'h_': 3},
     #type_ternary() | {'n': 1024, 'q':       274887787, 'w': 10},
     #type_ternary() | {'n': 1024, 'q':       274887787, 'w': 11},
     #type_ternary() | {'n': 1024, 'q':       274887787, 'w': 12},
 
-    type_ternary() | {'n': 1024, 'q': 607817174438671, 'w': 17},
+    #type_ternary() | {'n': 1024, 'q': 607817174438671, 'w': 17},
     #type_ternary() | {'n': 1024, 'q': 607817174438671, 'w': 18},
     #type_ternary() | {'n': 1024, 'q': 607817174438671, 'w': 19},
     #type_ternary() | {'n': 1024, 'q': 607817174438671, 'w': 20},
 ]
 
 
-mod_switch_limit = 2**27
+mod_switch_limit = 2**29
 mod_switch_prime = next_prime(mod_switch_limit)
 for i, p in enumerate(atk_params):
     if p['q'] > mod_switch_limit:

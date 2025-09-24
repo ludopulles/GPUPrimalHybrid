@@ -299,7 +299,10 @@ def svp_babai_fp64_nr_projected(
             #    print('Current guess: idx=', guess_idx[0, :], ' val=', guess_val[:, bid])
             #    print('target: ', bs_gpu[:, bid].T)
 
-            idx = cp.where(cp.sum(Y * Y, axis=0) <= proj_sqnorm)[0]  # find good candidates
+            # idx = cp.where(cp.sum(Y * Y, axis=0) <= proj_sqnorm)[0]  # find good candidates
+            cp.square(Y, out=Y)  # square inplace
+            idx = cp.where(cp.sum(Y, axis=0) <= proj_sqnorm)[0]  # find good candidates
+
             # improvement possible : check if it's well reduce or not by checking if Q.T (t - Bu) <= 1/2 (||b_i*||²)
             # and if not reduce it with nearest plane again
             if idx.size == 0: continue
@@ -360,6 +363,17 @@ def svp_babai_fp64_nr_projected(
         print(f"\rBabai-NP: unsuccessful                    ", flush=True)
     return None
 
+
+def index_at_ratio(indices, max_idx):
+    at_index, j = 0, 0
+    for i in range(max_idx):
+        if indices[j] == i:
+            j += 1
+            if j == len(indices):
+                break
+            continue
+        at_index += comb(max_idx - i - 1, len(indices) - j - 1)
+    return at_index / comb(max_idx, len(indices))
 
 def generate_LWE_instance(params, _seed=None):
     """
@@ -531,10 +545,14 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, verbos
     # TODO: remove this code section
     __s = lwe[2]  # A, b, s, e
     __s_guess = np.array(__s, dtype=np.int64)[columns_dropped]
+    svp_babai_kwargs = {}
     if np.count_nonzero(__s_guess) == w_guess:
         nonzeros = np.nonzero(__s_guess)
+        at_ratio = index_at_ratio(nonzeros[0], len(columns_dropped))
         print(f"Iteration #{iteration}: contains correct guess: {__s_guess[nonzeros]}"
-              f" at {nonzeros[0]} ~{round(100.0*nonzeros[0][0]/len(columns_dropped)):3d}%", flush=True)
+              f" at {nonzeros[0]} ~{round(100.0 * at_ratio):3d}%", flush=True)
+        svp_babai_kwargs['corr_val'] = __s_guess[nonzeros]
+        svp_babai_kwargs['corr_idx'] = nonzeros[0]
     del __s_guess  # END OF DEBUGGING PART
 
     if is_binomial:
@@ -716,14 +734,16 @@ def parallel_run(iterations, lwe, params, result, num_workers, only_correct_gues
 
     if only_correct_guess:
         _setup_process(lwe, params, num_gpus - 1, num_cores)
-        iteration = 1
-        while True:
+        iteration, num_success = 0, 5
+        while num_success > 0:
+            iteration += 1
             t1, result["success"], t2 = time.time(), do_correct_guess(iteration), time.time()
             result["time_elapsed"] = t2 - t1
             if result["success"]:
-                return result
-            print("Correct guess not found. Retrying...", flush=True)
-            iteration += 1
+                num_success -= 1
+            else:
+                print("Correct guess not found. Retrying...", flush=True)
+        return result
 
     # Don't use more GPUs than workers
     num_gpus = min(num_gpus, num_workers)

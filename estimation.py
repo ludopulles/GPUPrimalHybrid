@@ -19,7 +19,7 @@ def draws_for_confidence(n, k, w, h, confidence):
 
 def required_iterations(params, success_probability=0.99):
     N, k, w, h_ = params["n"] * params.get("k_dim", 1), params['k'], params['w'], params['h_']
-    return draws_for_confidence(N, k, w, h_, 0.99)
+    return draws_for_confidence(N, k, w, h_, success_probability)
 
 
 def mu2(eta):
