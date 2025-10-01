@@ -129,7 +129,7 @@ def find_attack_parameters(params):
 
     if not all(key in params for key in ['beta', 'eta_svp', 'm', 'k', 'h_']):
         print("Computing the best attack parameters...", flush=True)
-        cost = LWE.primal_hybrid(lwe_params, babai=True, mitm=False)
+        cost = LWE.primal_hybrid(lwe_params, babai=True, mitm=False, red_shape_model='CN11')
         cost["m"] = cost["d"] - (N - cost["zeta"]) - 1
         print(cost)
 

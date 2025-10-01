@@ -31,6 +31,57 @@ The attack implements a hybrid primal attack against LWE instances with differen
    pip install -r requirements.txt
    ```
 
+If this didn't work, do the following:
+1. Clone the required repositories:
+
+```bash
+REPOS=(
+  "https://github.com/plvie/G6K-GPU-Tensor.git"
+  "https://github.com/ludopulles/lattice-estimator.git"
+  "https://github.com/ludopulles/cuBLASter.git"  #(private)
+)
+
+echo "Cloning repositories..."
+for REPO in "${REPOS[@]}"; do
+  git clone "$REPO"
+done
+
+conda activate lwe_attack
+```
+
+2. Install g6k with GPU support:
+
+```bash
+cd ./G6K-GPU-Tensor/
+conda activate lwe_attack
+sudo apt-get install gcc libgmp-dev libmpfr-dev libqd-dev fplll-tools
+pip install -e .
+cd ../
+```
+
+3. Install cuBlaster (currently private):
+
+```bash
+cd ./cuBLASter/
+make eigen3
+pip install -e .
+cp ./src/blaster_core.cpython-312-x86_64-linux-gnu.so ./src/blaster/
+cd ../
+```
+
+4. Install lattice-estimator with enhanced hybrid attack estimation support:
+```bash
+cd ./lattice-estimator
+pip install -e .
+```
+
+5. Install other dependencies:
+
+```bash
+pip install -r requirements.txt
+conda install -c conda-forge multiprocessing-logging tqdm
+```
+
 ## Main Components
 
 ``attack_testing.py``: Contains the main logic for the primal attack, including LWE instance creation, lattice embedding, reduction, SVP, and Babai's algorithm. It contains all functions for single-threaded execution (used for testing parameters, avoid using it for benchmarking).

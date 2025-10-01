@@ -535,15 +535,15 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, verbos
     __s = lwe[2]  # A, b, s, e
     __s_guess = np.array(__s, dtype=np.int64)[columns_dropped]
     svp_babai_kwargs = {}
-    if np.count_nonzero(__s_guess) == w_guess:
-        nonzeros = np.nonzero(__s_guess)
-        at_ratio = index_at_ratio(nonzeros[0], len(columns_dropped))
-        print(f"Iteration #{iteration}: contains correct guess: {__s_guess[nonzeros]}"
-              f" at {nonzeros[0]} ~{round(100.0 * at_ratio):3d}%", flush=True)
-        if verbose:
-            svp_babai_kwargs['corr_val'] = __s_guess[nonzeros]
-            svp_babai_kwargs['corr_idx'] = nonzeros[0]
-    del __s_guess  # END OF DEBUGGING PART
+    # if np.count_nonzero(__s_guess) == w_guess:
+    #     nonzeros = np.nonzero(__s_guess)
+    #     at_ratio = index_at_ratio(nonzeros[0], len(columns_dropped))
+    #     print(f"Iteration #{iteration}: contains correct guess: {__s_guess[nonzeros]}"
+    #           f" at {nonzeros[0]} ~{round(100.0 * at_ratio):3d}%", flush=True)
+    #     if verbose:
+    #         svp_babai_kwargs['corr_val'] = __s_guess[nonzeros]
+    #         svp_babai_kwargs['corr_idx'] = nonzeros[0]
+    # del __s_guess  # END OF DEBUGGING PART
 
     if is_binomial:
         e_stddev = sqrt(eta/2)
@@ -592,11 +592,31 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, verbos
         # check whether the corresponding target b - A_g s_g is a BDD instance using Babai NP.
         if "p" in params:
             e_stddev = error_distribution_rounding_upper_bound(params)
-        target = svp_babai_fp64_nr_projected(
-            reduced_basis, eta_svp, columns_dropped, columns_to_keep, A, b_vec, N,
-            k, m, q, secret_nonzero_support, w_guess, e_stddev, kannan_coeff,
-            verbose=verbose, **svp_babai_kwargs
-        )
+        # target = svp_babai_fp64_nr_projected(
+        #         reduced_basis, eta_svp, columns_dropped, columns_to_keep, A, b_vec, N,
+        #         k, m, q, secret_nonzero_support, w_guess, e_stddev, kannan_coeff,
+        #         verbose=verbose, **svp_babai_kwargs
+        #     )
+        for w_guess_ in range(w_guess+1):
+            # TODO: delete this debug code
+            # if np.count_nonzero(__s_guess) == w_guess:
+            #     nonzeros = np.nonzero(__s_guess)
+            #     at_ratio = index_at_ratio(nonzeros[0], len(columns_dropped))
+            #     print(f"Iteration #{iteration}: contains correct guess: {__s_guess[nonzeros]}"
+            #           f" at {nonzeros[0]} ~{round(100.0 * at_ratio):3d}%", flush=True)
+            #     if verbose:
+            #         svp_babai_kwargs['corr_val'] = __s_guess[nonzeros]
+            #         svp_babai_kwargs['corr_idx'] = nonzeros[0]
+            # - - - end debus code - - -
+            if verbose:
+                print(f" - - - processing w_guess={w_guess_} out of {w_guess} - - - ")
+            target = svp_babai_fp64_nr_projected(
+                reduced_basis, eta_svp, columns_dropped, columns_to_keep, A, b_vec, N,
+                k, m, q, secret_nonzero_support, w_guess_, e_stddev, kannan_coeff,
+                verbose=verbose, **svp_babai_kwargs
+            )
+            if not target is None:
+                break
     else:
         # reappend with the tau to call the svp (not for babai)
         reduced_basis = np.insert(reduced_basis, reduced_basis.shape[1], 0, axis=1)
