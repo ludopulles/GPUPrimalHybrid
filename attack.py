@@ -408,7 +408,7 @@ def pick_columns(n, k, _seed=None):
     return sorted(order[:k]), sorted(order[k:])  # drop, keep
 
 
-def drop_and_solve(lwe, params, iteration, verbose=False):
+def drop_and_solve(lwe, params, iteration, verbose=False, do_progressive_guessing=False):
     """
     Placeholder for the function that drops and solves the LWE instance.
 
@@ -424,7 +424,7 @@ def drop_and_solve(lwe, params, iteration, verbose=False):
     columns_dropped, columns_to_keep = pick_columns(N, k, _seed=iteration)
 
     return solve_guess(
-        lwe, params, iteration, columns_dropped, columns_to_keep, verbose=verbose)
+        lwe, params, iteration, columns_dropped, columns_to_keep, verbose=verbose, do_progressive_guessing=do_progressive_guessing)
 
 
 def drop_and_solve_correct_guess(lwe, params, iteration):
@@ -509,7 +509,7 @@ def plot_superposed_from_file_and_basis(
     fig.savefig(figpath)
     plt.close(fig)
 
-def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, verbose=False):
+def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, verbose=False, do_progressive_guessing=False):
     # LWE parameters:
     q, w = params["q"], params["w"]
     N = params["n"] * params.get("k_dim", 1)
@@ -592,31 +592,23 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, verbos
         # check whether the corresponding target b - A_g s_g is a BDD instance using Babai NP.
         if "p" in params:
             e_stddev = error_distribution_rounding_upper_bound(params)
-        # target = svp_babai_fp64_nr_projected(
-        #         reduced_basis, eta_svp, columns_dropped, columns_to_keep, A, b_vec, N,
-        #         k, m, q, secret_nonzero_support, w_guess, e_stddev, kannan_coeff,
-        #         verbose=verbose, **svp_babai_kwargs
-        #     )
-        for w_guess_ in range(w_guess+1):
-            # TODO: delete this debug code
-            # if np.count_nonzero(__s_guess) == w_guess:
-            #     nonzeros = np.nonzero(__s_guess)
-            #     at_ratio = index_at_ratio(nonzeros[0], len(columns_dropped))
-            #     print(f"Iteration #{iteration}: contains correct guess: {__s_guess[nonzeros]}"
-            #           f" at {nonzeros[0]} ~{round(100.0 * at_ratio):3d}%", flush=True)
-            #     if verbose:
-            #         svp_babai_kwargs['corr_val'] = __s_guess[nonzeros]
-            #         svp_babai_kwargs['corr_idx'] = nonzeros[0]
-            # - - - end debus code - - -
-            if verbose:
-                print(f" - - - processing w_guess={w_guess_} out of {w_guess} - - - ")
+        if not do_progressive_guessing:
             target = svp_babai_fp64_nr_projected(
-                reduced_basis, eta_svp, columns_dropped, columns_to_keep, A, b_vec, N,
-                k, m, q, secret_nonzero_support, w_guess_, e_stddev, kannan_coeff,
-                verbose=verbose, **svp_babai_kwargs
-            )
-            if not target is None:
-                break
+                    reduced_basis, eta_svp, columns_dropped, columns_to_keep, A, b_vec, N,
+                    k, m, q, secret_nonzero_support, w_guess, e_stddev, kannan_coeff,
+                    verbose=verbose, **svp_babai_kwargs
+                )
+        else:
+            for w_guess_ in range(w_guess+1):
+                if verbose:
+                    print(f" - - - processing w_guess={w_guess_} out of {w_guess} - - - ")
+                target = svp_babai_fp64_nr_projected(
+                    reduced_basis, eta_svp, columns_dropped, columns_to_keep, A, b_vec, N,
+                    k, m, q, secret_nonzero_support, w_guess_, e_stddev, kannan_coeff,
+                    verbose=verbose, **svp_babai_kwargs
+                )
+                if not target is None:
+                    break
     else:
         # reappend with the tau to call the svp (not for babai)
         reduced_basis = np.insert(reduced_basis, reduced_basis.shape[1], 0, axis=1)
@@ -657,7 +649,7 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, verbos
     )
 
 
-def _setup_process(lwe, params, gpu_id, num_cores):
+def _setup_process(lwe, params, gpu_id, num_cores, do_progressive_guessing):
     global shared_lwe, shared_params, shared_gpu
     shared_lwe, shared_params, shared_gpu = lwe, params, gpu_id
 
@@ -687,9 +679,9 @@ def _setup_process(lwe, params, gpu_id, num_cores):
     # os.sched_setaffinity(0, num_cores)
 
 
-def worker(it, verbose):
+def worker(it, verbose, do_progressive_guessing):
     global shared_lwe, shared_params
-    return drop_and_solve(shared_lwe, shared_params, it, verbose)
+    return drop_and_solve(shared_lwe, shared_params, it, verbose, do_progressive_guessing)
 #        for i in range(start, stop):
 #            if stop_event.is_set():
 #                # Another worker had success, abort.
@@ -738,7 +730,7 @@ def _pool_report(tag=""):
 
 
 # --- orchestration -----------------------------------------------------------
-def parallel_run(iterations, lwe, params, result, num_workers, only_correct_guess, verbose):
+def parallel_run(iterations, lwe, params, result, num_workers, only_correct_guess, verbose, do_progressive_guessing=False):
     num_gpus = gpu_count()
     assert num_gpus >= 1
     num_gpus = min(num_gpus, 2)
@@ -782,11 +774,11 @@ def parallel_run(iterations, lwe, params, result, num_workers, only_correct_gues
 
     if num_workers == 1:
         start_time = time.time()
-        _setup_process(lwe, params, 0, num_cores)
+        _setup_process(lwe, params, 0, num_cores, do_progressive_guessing)
         try:
             for i in tqdm(range(iterations), total=iterations, leave=False):
                 result["iterations_used"] += 1
-                if worker(i, verbose):
+                if worker(i, verbose, do_progressive_guessing):
                     result["success"] = True
                     break
         except KeyboardInterrupt:
@@ -796,7 +788,7 @@ def parallel_run(iterations, lwe, params, result, num_workers, only_correct_gues
     else:
         pools = [ProcessPoolExecutor(
             max_workers=num_workers_per_gpu[gpu], mp_context=ctx,
-            initializer=_setup_process, initargs=(lwe, params, gpu, num_cores)
+            initializer=_setup_process, initargs=(lwe, params, gpu, num_cores, do_progressive_guessing)
         ) for gpu in range(num_gpus)]
 
         time.sleep(5)  # Create the process pool
@@ -806,7 +798,7 @@ def parallel_run(iterations, lwe, params, result, num_workers, only_correct_gues
 
         for g, (fr, to) in enumerate(divide_range(iterations, num_gpus)):
             for i in range(fr, to):
-                jobs.append(pools[g].submit(worker, i, verbose))
+                jobs.append(pools[g].submit(worker, i, verbose, do_progressive_guessing))
 
         # jobs = []
 
@@ -849,7 +841,7 @@ def parallel_run(iterations, lwe, params, result, num_workers, only_correct_gues
     return result
 
 
-def run_single_attack(params, run_id, num_workers, only_correct_guess, verbose):
+def run_single_attack(params, run_id, num_workers, only_correct_guess, verbose, do_progressive_guessing=False):
     result = {
         "run_id": run_id,
         "n": params["n"],
@@ -871,14 +863,14 @@ def run_single_attack(params, run_id, num_workers, only_correct_guess, verbose):
     # Run attack
     try:
         result = parallel_run(
-            iterations, lwe, params, result, num_workers, only_correct_guess, verbose
+            iterations, lwe, params, result, num_workers, only_correct_guess, verbose, do_progressive_guessing
         )
     except:
         result["error"] = traceback.format_exc()
     return result
 
 
-def batch_attack(output_csv, num_workers, runs, only_correct_guess, verbose):
+def batch_attack(output_csv, num_workers, runs, only_correct_guess, verbose, do_progressive_guessing=False):
     if runs == 0:
         for params in attack_params.atk_params:
             params_ = find_attack_parameters(params)
@@ -899,7 +891,7 @@ def batch_attack(output_csv, num_workers, runs, only_correct_guess, verbose):
             output_params_info(params_)
 
             for run_id in range(runs):
-                result = run_single_attack(params_, run_id, num_workers, only_correct_guess, verbose)
+                result = run_single_attack(params_, run_id, num_workers, only_correct_guess, verbose, do_progressive_guessing)
                 writer.writerow(result)
                 csvfile.flush()
                 if result["time_elapsed"] is not None:
@@ -924,7 +916,8 @@ if __name__ == "__main__":
     parser.add_argument('--workers', '-w', type=int, default=4, help='Number of workers to allocate')
     parser.add_argument('--runs', '-r', type=int, default=1, help='Number of repetitions (0: only estimate)')
     parser.add_argument('--correct', '-c', action='store_true', help='Only run attack on correct guesses')
+    parser.add_argument('--prog', '-p', action='store_true', help='Make progressive guesses - speeds up the attack on average')
     parser.add_argument('--verbose', '-v', action='store_true', help='More verbose output')
 
     args = parser.parse_args()
-    batch_attack(args.output, args.workers, args.runs, args.correct, args.verbose)
+    batch_attack(args.output, args.workers, args.runs, args.correct, args.verbose, args.prog)
