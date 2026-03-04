@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Usage: ./setup_env.sh <conda_env_name>
+# Usage: ./install.sh <conda_env_name>
 # If no env name is provided, the script uses lwe_attack as name.
 
 # Determine environment name
@@ -16,20 +16,36 @@ conda env create -f environment.yml -n "${ENV_NAME}"
 
 # Activate the new environment
 echo "Activating environment '${ENV_NAME}'..."
+set +euo pipefail 
 eval "$(conda shell.bash hook)"
 conda activate "${ENV_NAME}"
+set -euo pipefail
 
-# Array of repositories to clone
-REPOS=(
-  "https://github.com/plvie/G6K-GPU-Tensor.git"
-  "https://github.com/ludopulles/lattice-estimator.git"
-  "https://github.com/ludopulles/cuBLASter.git"  #(private)
-)
+echo "Checking for CUDA Toolkit..."
+if ! command -v nvcc &> /dev/null; then
+    if [ -d "/usr/local/cuda/bin" ]; then
+        export PATH="/usr/local/cuda/bin:$PATH"
+    fi
+fi
+if ! command -v nvcc &> /dev/null; then
+    echo "ERROR: nvcc (CUDA compiler) not found."
+    echo "Please install the CUDA Toolkit or load the correct module (e.g., 'module load cuda')."
+    exit 1
+fi
 
-echo "Cloning repositories..."
-for REPO in "${REPOS[@]}"; do
-  git clone "$REPO"
-done
+clone_repo() {
+    local url=$1
+    local dir=$2
+    if [ -d "$dir" ]; then
+        echo "Directory '$dir' already exists. Skipping clone."
+    else
+        git clone "$url" "$dir"
+    fi
+}
+
+clone_repo "https://github.com/plvie/G6K-GPU-Tensor.git" "G6K-GPU-Tensor"
+clone_repo "https://github.com/ludopulles/lattice-estimator.git" "lattice-estimator"
+clone_repo "https://github.com/ludopulles/cuBLASter.git" "cuBLASter"
 
 # Install lattice-estimator
 echo "Installing lattice-estimator in editable mode..."
@@ -41,15 +57,42 @@ popd >/dev/null
 # Build G6K-GPU-Tensor
 echo "Building G6K-GPU-Tensor..."
 pushd G6K-GPU-Tensor >/dev/null
+pip install Cython
+REAL_NVCC=$(readlink -f $(which nvcc))
+REAL_CUDA_DIR=$(dirname $(dirname "$REAL_NVCC"))
+REAL_CXX=$(which g++)
+REAL_CC=$(which gcc)
+REAL_PYTHON=$(which python)
+
+echo "Patching all hardcoded paths (CUDA, GCC, Python)"
+
+find . -type f \( -name "Makefile" -o -name "*.py" -o -name "*.sh" -o -name "*.mk" \) -exec sed -E -i "s|/usr/local/cuda[-0-9\.]*|$REAL_CUDA_DIR|g" {} +
+
+find . -type f \( -name "Makefile" -o -name "*.mk" -o -name "*.sh" \) -exec sed -i "s|/usr/bin/g++|$REAL_CXX|g" {} +
+find . -type f \( -name "Makefile" -o -name "*.mk" -o -name "*.sh" \) -exec sed -i "s|/usr/bin/gcc|$REAL_CC|g" {} +
+
+find . -type f \( -name "Makefile" -o -name "*.sh" \) -exec sed -i "s|python3 |$REAL_PYTHON |g" {} +
+find . -type f \( -name "Makefile" -o -name "*.sh" \) -exec sed -i "s|/usr/bin/python3|$REAL_PYTHON|g" {} +
+
+export CUDA_PATH="$REAL_CUDA_DIR"
+export CUDA_HOME="$REAL_CUDA_DIR"
+export CC="$REAL_CC"
+export CXX="$REAL_CXX"
+
+chmod +x rebuild.sh
+pip install -r requirements.txt
 ./rebuild.sh -f -y
+python setup.py install
 popd >/dev/null
 
-# Install BLASter in editable mode
-echo "Installing BLASter in editable mode..."
-pushd BLASter >/dev/null
-pip install -e .
+# Install cuBLASter in editable mode
+echo "Installing cuBLASter in editable mode..."
+pushd cuBLASter >/dev/null
+make eigen3
+pip install --no-build-isolation -e .
 popd >/dev/null
 
 pip install -r requirements.txt
 
 echo "All done! Your environment is ready and repositories are cloned and installed."
+echo "Don't forget to activate the '${ENV_NAME}' environment before running any code: conda activate ${ENV_NAME}"

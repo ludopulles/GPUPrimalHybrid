@@ -5,3 +5,5 @@ dependencies:
   - sage
   - python=3.12
   - cupy
+  - gcc_linux-64<=14
+  - gxx_linux-64<=14

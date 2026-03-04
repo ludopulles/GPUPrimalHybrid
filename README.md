@@ -18,6 +18,10 @@ Software:
 
 ## Installation
 
+You will need the CUDA toolkit installed and properly configured on your system to run this code. Make sure to have the appropriate drivers and CUDA version compatible with your GPU.
+You can install it via the [official NVIDIA website](https://developer.nvidia.com/cuda-downloads).
+If you consider installing a CUDA version lower than 12, please edit the `environment.yml` file to specify the compatible versions of `gcc` and `g++` (e.g., `gcc_linux-64<=11` and `gxx_linux-64<=11` for CUDA 11.x).
+
 1. Install `conda` if you haven't already, see [conda docs](https://www.anaconda.com/docs/getting-started/miniconda/install).
 2. Run the installation scripts: `./install.sh`
 3. Install all required Python packages *in the environment*: `pip install -r requirements.txt`
