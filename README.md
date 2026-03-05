@@ -32,7 +32,7 @@ If you consider installing a CUDA version lower than 12, please edit the `enviro
 	Use this for actual attacks.
 	See [Usage section](#Usage) below for details.
 - `attack_params.py`: Contains a list of parameter sets for different LWE instances to be attacked.
-	We advise you to **uncomment just one* parameter set, when using the `attack.py` script (or its variant).
+	We advise you to **uncomment just one** parameter set, when using the `attack.py` script (or its variant).
 	One may optionally specify the attack parameters, see the commented lines for examples.
 
 There are some variants/dialects of `attack.py` for testing purposes:
@@ -90,12 +90,14 @@ For example, to repeat the first "MLWE parameters" row of Table 2, perform these
 
 1. In the file `attack_params.py`, make sure `atk_params` contains `    type_binomial(2, 2) | {'n': 256, 'q': 3329, 'w': 11},`.
 2. Execute in your conda environment:
+
 ```bash
 python attack.py -o binomial-q12-w11.csv -w2 -v |& tee binomial-q12-w11-details.txt
 ```
-	Note: this will also write all terminal output to the file `binomial-q12-w11-details.txt`.
-	Moreover, we use two workers, which may not be optimal in general.
-	If you have only one consumer GPU, use one worker. If you have many GPUs, increase the number of workers.
+
+Note: this will also write all terminal output to the file `binomial-q12-w11-details.txt`.
+Moreover, we use two workers, which may not be optimal in general.
+If you have only one consumer GPU, use one worker. If you have many GPUs, increase the number of workers.
 
 ### Command line arguments
 
