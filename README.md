@@ -28,12 +28,19 @@ If you consider installing a CUDA version lower than 12, please edit the `enviro
 
 ## Main Components
 
-``attack_testing.py``: Contains the main logic for the primal attack, including LWE instance creation, lattice embedding, reduction, SVP, and Babai's algorithm. It contains all functions for single-threaded execution (used for testing parameters, avoid using it for benchmarking).
+- `attack.py`: Implements multi-GPU parallelization, distributing the workload across available GPUs and managing worker processes.
+	Use this for actual attacks.
+	See [Usage section](#Usage) below for details.
+- `attack_params.py`: Contains a list of parameter sets for different LWE instances to be attacked.
+	We advise you to **uncomment just one* parameter set, when using the `attack.py` script (or its variant).
+	One may optionally specify the attack parameters, see the commented lines for examples.
 
-``attack_for_benchmark.py``: Implements multi-GPU parallelization, distributing the workload across available GPUs and managing worker processes. Use this for actual attacks. (see Usage section below for details)
-This code is also cleaner and easier to read than attack_testing.py because it does not contain all the testing code.
+There are some variants/dialects of `attack.py` for testing purposes:
 
-``attack_params.py``: Contains a list of parameter sets for different LWE instances to be attacked. You can modify this file to add or change the parameters for your specific use cases.
+- `attack_testing.py`: Contains the main logic for the primal attack, including LWE instance creation, lattice embedding, reduction, SVP, and Babai's algorithm.
+	It contains all functions for single-threaded execution (used for testing parameters, avoid using it for benchmarking).
+	This code is more detailed than `attack.py` because of all the testing code.
+- `attack_reduce_vram.py`: Attempts at reducing the VRAM usage on the GPU, by repeatedly recreating the `cupy` context. This may slightly slow down execution.
 
 ## Parameters
 
@@ -76,6 +83,21 @@ To run the attack, execute the following command in your environment:
 ```bash
 python attack.py
 ```
+
+### Example usage
+
+For example, to repeat the first "MLWE parameters" row of Table 2, perform these two steps:
+
+1. In the file `attack_params.py`, make sure `atk_params` contains `    type_binomial(2, 2) | {'n': 256, 'q': 3329, 'w': 11},`.
+2. Execute in your conda environment:
+```bash
+python attack.py -o binomial-q12-w11.csv -w2 -v |& tee binomial-q12-w11-details.txt
+```
+	Note: this will also write all terminal output to the file `binomial-q12-w11-details.txt`.
+	Moreover, we use two workers, which may not be optimal in general.
+	If you have only one consumer GPU, use one worker. If you have many GPUs, increase the number of workers.
+
+### Command line arguments
 
 To see all command line arguments, execute `python attack.py -h` in your environment.
 In particular, you can specify the number of workers (X) with `-wX`.
