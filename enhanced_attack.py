@@ -2,12 +2,11 @@
 # for the n=512, q= 3329, w=11, we can set cores=1, num_workers=(number of cores of the machine) (keep in mind that the machine need to have enough GPU also)
 
 import argparse
+import copy
 import csv
 import numpy as np
 import os
-import psutil
 import subprocess
-import sys
 import time
 import traceback
 
@@ -20,20 +19,19 @@ from tqdm import tqdm
 from sage.all import seed
 
 # Local imports
-from blaster import reduce, get_profile, slope, rhf, set_num_cores
+from blaster import reduce, get_profile, set_num_cores
 
 from fpylll.util import gaussian_heuristic
 from fpylll import IntegerMatrix, CVP
 
 # In this directory
 import attack_params
-from estimation import find_attack_parameters, output_params_info, required_iterations, error_distribution_rounding, error_distribution_rounding_upper_bound
-from instances import BaiGalCenteredScaledTernary, BaiGalModuleLWE, \
-    estimate_target_upper_bound_ternary_vec, estimate_target_upper_bound_binomial_vec
+from estimation import find_attack_parameters, output_params_info, error_distribution_rounding, error_distribution_rounding_upper_bound
 from lwe import generate_CBD_MLWE, generate_ternary_MLWE, MLWE_to_LWE, bai_galbraith_embedding, \
     select_samples, RoundedDownLWE
 
 import matplotlib.pyplot as plt
+
 
 def BKZ_reduce(basis, beta, verbose=False):
     B, B_red, U = np.ascontiguousarray(np.array(basis, dtype=np.int64).T), None, None
@@ -217,7 +215,7 @@ def svp_babai_fp64_nr_projected(
 
     # Execute Babai's Nearest Plane Algorithm using the last `babai_dim`
     # Gram--Schmidt vectors of the basis.
-    G = comb(k, w_guess) * (len(secret_nonzero_support) ** w_guess)  # number of incorrect guesses
+    G = comb(k, w_guess) * (len(secret_nonzero_support) ** w_guess)   # number of incorrect guesses
     babai_dim, proj_norm = find_optimal_projection_dimension(
         cp.asnumpy(cp.diag(R)), G, e_stddev, 0.001, 0.001
     )
@@ -226,7 +224,7 @@ def svp_babai_fp64_nr_projected(
         print(f"Running Babai-NP in dimension {babai_dim} out of original {R.shape[1]}")
         print(f"Babai-NP norm bound: {proj_norm:.4f}")
     proj_sqnorm = proj_norm**2
-    full_norm = sqrt(2 * e_stddev**2 * (m + n - k))
+    full_norm = sqrt(3 * e_stddev**2 * (m + n - k+1))
 
     # Select first `m` rows, because that's where b is nonzero.
     # Select last `babai_dim` columns, because that's where we perform Babai.
@@ -274,10 +272,10 @@ def svp_babai_fp64_nr_projected(
 
             guess_batch = A_guess_gpu[:, guess_idx]  # (m, idx_size, w_guess)
             guess_batch = guess_batch.reshape(m * idx_size, w_guess)  # all columns of A^T concatenated
-            guess_batch = (guess_batch @ guess_val.astype(cp.float64)).reshape(m, batch_size)  # A s_g
+            guess_batch = (guess_batch @ guess_val.astype(cp.float64)).reshape(m, batch_size)  # A s_g  A*s_g values
 
             # Make copies of b:
-            bs_gpu = cp.broadcast_to(b_gpu[:, None], (m, batch_size)) - guess_batch
+            bs_gpu = cp.broadcast_to(b_gpu[:, None], (m, batch_size)) - guess_batch # corresponds to b'=b-A*s_g
             bs_gpu %= q
 
             Y = QT_np @ bs_gpu  # Q^T (b - A_g s_g)
@@ -291,7 +289,6 @@ def svp_babai_fp64_nr_projected(
 
             cp.square(Y, out=Y)  # square inplace
             idx = cp.where(cp.sum(Y, axis=0) <= proj_sqnorm)[0]  # find good candidates
-
             # improvement possible : check if it's well reduce or not by checking if Q.T (t - Bu) <= 1/2 (||b_i*||²)
             # and if not reduce it with nearest plane again
             if idx.size == 0: continue
@@ -308,20 +305,20 @@ def svp_babai_fp64_nr_projected(
                 # vals_d = guess_val[:, b_idx]
                 # A_rm_sub = cp.asarray(A_guess[:, cp.asnumpy(id_subset)], dtype=cp.float64)
                 # print('Compare: ', A_rm_sub @ vals_d, 'with', guess_batch[:, idx_t])
-                # assert (A_rm_sub @ vals_d) == 
+                # assert (A_rm_sub @ vals_d) ==
                 # b_try = b_host[:-1].copy()
                 # b_try[-m:] -= cp.asnumpy((A_rm_sub @ vals_d).astype(cp.int64))
                 # print('b: ', bs_gpu[:, idx_t])
                 t = np.concatenate((cp.asnumpy(bs_gpu[:, idx_t]), np.zeros(n-k)))
                 t = np.rint(t).astype(np.int64)
 
-                print(" FPLLL call took: ", end="", flush=True)
+                #print(" FPLLL call took: ", end="", flush=True)
                 t_fplll = time.time()
                 B = IntegerMatrix.from_matrix(basis)
                 v = t - np.array(CVP.babai(B, t), dtype=np.int64)
                 # print('Possible candidate: ', v, np.linalg.norm(v), 'vs', full_norm)
                 t_fplll = time.time() - t_fplll
-                print(f"{t_fplll:.2f} seconds.", flush=True)
+                #print(f"{t_fplll:.2f} seconds.", flush=True)
 
                 if np.linalg.norm(v) <= full_norm:
                     # TODO: also return s_guess
@@ -351,7 +348,168 @@ def svp_babai_fp64_nr_projected(
     if verbose:
         print(f"\rBabai-NP: unsuccessful                    ", flush=True)
     return None
+def svp_babai_fp64_nr_projected_multi_target(
+    basis, eta, columns_dropped, columns_to_keep, A, b_vecs, n, k, m, q,
+    secret_nonzero_support, w_guess, e_stddev, kannan_coeff, verbose=False, corr_val=None, corr_idx=None,
+):
+    """
+    Parallel processing version of Babai algorithm for multiple b_vec arrays
+    b_vecs: list containing multiple b_vecs, each b_vec ( vec(x^rotind \cdot b) ) corresponds to a vec(x^rotind \cdot s)
 
+    # This is only a validation implementation version without any optimization.
+    # The required GPU memory is len(b_vecs) times that of svp_babai_fp64_nr_projected
+    # (because corresponding matrices will be created for each b_vec).
+    """
+    import cupy as cp
+    from kernel_babai import nearest_plane_gpu, _build_choose_table_dev, guess_batches_gpu, \
+        value_batches_fp32_gpu, precompute_nearest_plane
+    from estimation import find_optimal_projection_dimension
+
+    basis_gpu = cp.asarray(basis.T, dtype=cp.float64, order="F")  # B_red (column notation)
+
+    # Process multiple b_vecs: convert b_vecs to 3D GPU array (num_targets, m, 1)
+    num_targets = len(b_vecs)
+    b_hosts = [np.array(b_vec.list()[:m], dtype=np.int64) for b_vec in b_vecs]  # each b
+    b_gpu_3d = cp.asarray(np.stack(b_hosts, axis=0), dtype=cp.float64)  # (num_targets, m)
+    b_gpu_3d = b_gpu_3d.transpose(0, 1)[:, :, None]  # (num_targets, m, 1)
+
+    A_guess = np.array(A, dtype=np.int64).T[:m, columns_dropped]  # (m, k)
+    A_guess_gpu = cp.asarray(A_guess, dtype=cp.float64)  # (m, k)
+
+    # Decompose B = Q * R -> Q^T B = R.
+    QT, R = cp.linalg.qr(basis_gpu, mode="reduced")
+    QT = QT.T
+
+    # Execute Babai's Nearest Plane Algorithm using the last `babai_dim`
+    # Gram--Schmidt vectors of the basis.
+    G = comb(k, w_guess) * (len(secret_nonzero_support) ** w_guess)   # number of incorrect guesses
+    babai_dim, proj_norm = find_optimal_projection_dimension(
+        cp.asnumpy(cp.diag(R)), G, e_stddev, 0.001, 0.001
+    )
+
+    if verbose:
+        print(f"Running Babai-NP in dimension {babai_dim} out of original {R.shape[1]}")
+        print(f"Babai-NP norm bound: {proj_norm:.4f}")
+        print(f"Processing {num_targets} target vectors in parallel")
+    proj_sqnorm = proj_norm**2
+    full_norm = sqrt(3 * e_stddev**2 * (m + n - k+1))
+
+    # Select first `m` rows, because that's where b is nonzero.
+    # Select last `babai_dim` columns, because that's where we perform Babai.
+    QT_np = QT[-babai_dim:, :m]
+    R_np = R[-babai_dim:, -babai_dim:]
+
+    # setup variables for Babai Nearest Plane:
+    data_np, data = precompute_nearest_plane(R_np), None
+
+    if verbose and corr_val is not None and corr_idx is not None:
+        # Test correct guess for each target vector
+        for target_idx in range(num_targets):
+            b_try = b_gpu_3d[target_idx, :, 0].copy()
+            As_try = A_guess_gpu[:, corr_idx].reshape(m, w_guess)
+            b_try[:m] -= (As_try @ cp.asarray(corr_val, dtype=cp.float64)).reshape(m)
+
+            y0 = QT_np @ b_try  # y0 = Q^T b
+            U = cp.empty_like(y0)
+            nearest_plane_gpu(R_np, y0[:, None], U[:, None], *data_np)
+            l2norm = cp.linalg.norm(y0).get()
+            if verbose:
+                print(f"Babai-NP of correct guess (target {target_idx}) has norm: {l2norm:.3f} (<= {proj_norm:.4f}?)")
+
+    GUESS_BATCH = 512*3
+    #adjust  GUESS_BATCH, VALUE_BATCH to fit GPU memory constraints
+    VALUE_BATCH = 512
+
+    num_done = 0
+
+    choose_dev = _build_choose_table_dev(k, w_guess + 1)  # Table of (k choose i)'s (i <= w_guess)
+    vals_dev = cp.asarray(secret_nonzero_support, dtype=cp.float32)
+
+    for guess_val in value_batches_fp32_gpu(vals_dev, w_guess, VALUE_BATCH):
+        # Enumerate all possible values v_1, ... v_{w_guess} \in secret_nonzero_support.
+        val_size = guess_val.shape[1]
+        # dimensions of guess_val: w_guess x val_size
+
+        for guess_idx in guess_batches_gpu(k, w_guess, GUESS_BATCH, choose_dev=choose_dev):
+            # Enumerate all possible (i_1, ..., i_{w_guess}) such that we have
+            # 1 <= i_1 < i_2 < ... < i_{w_guess} <= k.
+            idx_size = guess_idx.shape[0]  # assert idx_size <= GUESS_BATCH
+            # dimensions of guess_idx: idx_size x w_guess
+            batch_size = idx_size * val_size
+            if verbose:
+                num_done += batch_size
+                percentage = round(float(100.0 * num_done) / G)
+                print(f"\rBabai-NP: {num_done:9d}/{G:9d} ({percentage:3d}%)", end="", flush=True)
+
+            guess_batch = A_guess_gpu[:, guess_idx]  # (m, idx_size, w_guess)
+            guess_batch = guess_batch.reshape(m * idx_size, w_guess)  # all columns of A^T concatenated
+            guess_batch = (guess_batch @ guess_val.astype(cp.float64)).reshape(m, batch_size)  # A s_g  A*s_g values
+
+
+            bs_gpu = cp.broadcast_to(b_gpu_3d, (num_targets, m, batch_size)) - guess_batch[None, :, :]  # corresponds to b'=b-A*s_g
+            bs_gpu %= q
+
+            Y = cp.einsum('ij,njk->nik', QT_np, bs_gpu)  # Q^T (b - A_g s_g) for each target
+
+            Y_reshaped = Y.transpose(1, 0, 2).reshape(babai_dim, num_targets * batch_size)
+
+
+            U_reshaped = cp.empty((babai_dim, num_targets * batch_size), dtype=cp.float64)
+
+
+            nearest_plane_gpu(R_np, Y_reshaped, U_reshaped, *data_np)
+
+            U = U_reshaped.reshape(babai_dim, num_targets, batch_size).transpose(1, 0, 2)
+            Y = Y_reshaped.reshape(babai_dim, num_targets, batch_size).transpose(1, 0, 2)
+
+
+            cp.square(Y, out=Y)  # square inplace
+            norms_squared = cp.sum(Y, axis=1)  # (num_targets, batch_size)
+
+
+            for target_idx in range(num_targets):
+                idx = cp.where(norms_squared[target_idx] <= proj_sqnorm)[0]  # find good candidates for this target
+
+                if idx.size == 0:
+                    continue
+
+                for i in range(idx.size):
+                    idx_t = int(idx[i].get())
+
+                    t = np.concatenate((cp.asnumpy(bs_gpu[target_idx, :, idx_t]), np.zeros(n-k)))
+                    t = np.rint(t).astype(np.int64)
+
+                    #print(" FPLLL call took: ", end="", flush=True)
+                    t_fplll = time.time()
+                    B = IntegerMatrix.from_matrix(basis)
+                    v = t - np.array(CVP.babai(B, t), dtype=np.int64)
+                    # print('Possible candidate: ', v, np.linalg.norm(v), 'vs', full_norm)
+                    t_fplll = time.time() - t_fplll
+                    #print(f"{t_fplll:.2f} seconds.", flush=True)
+
+                    if np.linalg.norm(v) <= full_norm:
+                        # TODO: also return s_guess
+                        if verbose:
+                            print(f"\rBabai-NP: success at {percentage:3d}% (target {target_idx})                    ", flush=True)
+                        target = np.concatenate((v, [kannan_coeff]))
+                        return target, target_idx  # Return the target vector and its corresponding index
+
+                    if data is None:
+                        data = precompute_nearest_plane(R)
+                    y = QT @ cp.asarray(t)
+                    U_full = cp.empty_like(y)
+                    nearest_plane_gpu(R, y[:, None], U_full[:, None], *data)
+                    v = t + cp.asnumpy(basis_gpu @ U_full)
+                    v = (np.rint(v)).astype(np.int64)
+                    if np.linalg.norm(v) <= full_norm:
+                        if verbose:
+                            print(f"\rBabai-NP: success at {percentage:3d}% (target {target_idx})                    ", flush=True)
+                        target = np.concatenate((v, [kannan_coeff]))
+                        return target, target_idx  # Return the target vector and its corresponding index
+    # No solution found.
+    if verbose:
+        print(f"\rBabai-NP: unsuccessful                    ", flush=True)
+    return None, -1
 
 def index_at_ratio(indices, max_idx):
     at_index, j = 0, 0
@@ -389,7 +547,7 @@ def generate_LWE_instance(params, _seed=None):
     print(f"LWE instance is generated using seed {_seed}.")
 
     # Limit to `m` samples already.
-    lwe = select_samples(*lwe, params['m'])
+    #lwe = select_samples(*lwe, params['m'])
 
     if 'p' in params:
         # Rounding down...
@@ -493,7 +651,7 @@ def plot_superposed_from_file_and_basis(
     fig, ax = plt.subplots(figsize=(7, 4))
     ax.plot(i, r_file_log2[:d], lw=1.8, label=f"saved: prof_{beta}_{n}.npy (log2)")
     ax.plot(i, r_meas_log2[:d], lw=1.6, label="measured reduced_basis (log2)")
-              
+
     ax.set_xlabel("index i")
     ax.set_ylabel("log2")
     ttl = f"Basis profile superposition — β={beta}, n={n}"
@@ -509,10 +667,27 @@ def plot_superposed_from_file_and_basis(
     fig.savefig(figpath)
     plt.close(fig)
 
+def rot_vec(b,q,offset):
+    '''
+    b: a vector
+    offset: the offset of the rotation
+    return: the rotated vector vec(x^offset \cdot poly(b)) the polynomial ring is R=Z[x]/(x^n+1) with n=len(b)
+    '''
+    l=len(b)
+    b_copy=copy.deepcopy(b)
+    for i in range(l):
+        if i+offset<l:
+            b_copy[i+offset]=(b[i])
+        else:
+            b_copy[i+offset-l]=-1*b[i]
+    return b_copy
+
+
 def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, verbose=False):
     # LWE parameters:
     q, w = params["q"], params["w"]
-    N = params["n"] * params.get("k_dim", 1)
+    k_dim=params.get("k_dim", 1)
+    N = params["n"] * k_dim
     eta = params.get("eta", 1)  # width of centered binomial distribution
 
     # Determine secret type:
@@ -526,24 +701,33 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, verbos
     k = params["k"]  # number of secret coefficients to guess
     m = params["m"]  # number of dimensions used for Babai NP
     w_guess = params["h_"]  # weight of secret guess
-
+    n=params["n"] # the degree of the polynomial ring
     secret_nonzero_support = list(range(-eta, 0)) + list(range(1, eta + 1))
+    b_pri=copy.deepcopy(lwe[1])
+
+    lwe_pri=copy.deepcopy(lwe)
+    __s = copy.deepcopy(lwe[2])  # A, b, s, e
+    __e = copy.deepcopy(lwe[3])
+    lwe = select_samples(*lwe, params['m'])
     A = lwe[0]
+    # print(f'b_primary={lwe[1]}')
 
     # DEBUGGING PART (MAKES USE OF SECRET):
     # TODO: remove this code section
-    __s = lwe[2]  # A, b, s, e
-    __s_guess = np.array(__s, dtype=np.int64)[columns_dropped]
-    svp_babai_kwargs = {}
-    if np.count_nonzero(__s_guess) == w_guess:
-        nonzeros = np.nonzero(__s_guess)
-        at_ratio = index_at_ratio(nonzeros[0], len(columns_dropped))
-        print(f"Iteration #{iteration}: contains correct guess: {__s_guess[nonzeros]}"
-              f" at {nonzeros[0]} ~{round(100.0 * at_ratio):3d}%", flush=True)
-        if verbose:
-            svp_babai_kwargs['corr_val'] = __s_guess[nonzeros]
-            svp_babai_kwargs['corr_idx'] = nonzeros[0]
-    del __s_guess  # END OF DEBUGGING PART
+
+
+
+    # __s_guess = np.array(__s, dtype=np.int64)[columns_dropped]
+    # svp_babai_kwargs = {}
+    # if np.count_nonzero(__s_guess) == w_guess:
+    #     nonzeros = np.nonzero(__s_guess)
+    #     at_ratio = index_at_ratio(nonzeros[0], len(columns_dropped))
+    #     print(f"Iteration #{iteration}: contains correct guess: {__s_guess[nonzeros]}"
+    #           f" at {nonzeros[0]} ~{round(100.0 * at_ratio):3d}%", flush=True)
+    #     if verbose:
+    #         svp_babai_kwargs['corr_val'] = __s_guess[nonzeros]
+    #         svp_babai_kwargs['corr_idx'] = nonzeros[0]
+    # del __s_guess  # END OF DEBUGGING PART
 
     if is_binomial:
         e_stddev = sqrt(eta/2)
@@ -562,10 +746,11 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, verbos
         # Round instance down
         q = int(params['p'])
         e_stddev = error_distribution_rounding(params)
-    
+
     basis, b_vec, __target = bai_galbraith_embedding(
         N, q, w, lwe, k, m, s_stddev, e_stddev, columns_to_keep
     )
+
     kannan_coeff = b_vec[-1]
 
     if verbose:
@@ -578,38 +763,94 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, verbos
     t1 = time.time()
     reduced_basis = BKZ_reduce(basis, beta, verbose=verbose)
     t2 = time.time()
+    t_gpu=0
 
-    if verbose:
-        plot_superposed_from_file_and_basis(
-            beta,
-            N,
-            reduced_basis.T,
-            prof_from_get_profile=get_profile(reduced_basis.T)
-        ) # appear in dir saved_profiles/
+    # Collect all b_vec for parallel processing
+    b_vecs_list = []
+    targets_list = []
+    svp_babai_kwargs = {}
+    for rotind in range(n):
+        b_rot=[]
+        s_rot=[]
+        e_rot=[]
 
+        for i in range(k_dim): # vec(x^rotind \cdot s)
+            start_idx = i * n
+            end_idx = (i + 1) * n
+            s_part = rot_vec(__s[start_idx:end_idx], q, rotind) # For R=Z[X]/(x^n+1), equivalent to cyclic shift and negation
+            s_rot.extend(s_part)
+
+        b_part = rot_vec(b_pri, q, rotind) # vec (x^rotind \cdot b)
+        e_part = rot_vec(__e, q, rotind) # vec( x^rotind \cdot e )
+        b_rot.extend(b_part)
+        e_rot.extend(e_part)
+
+        __s_guess = np.array(s_rot, dtype=np.int64)[columns_dropped]
+
+        if np.count_nonzero(__s_guess) == w_guess:
+            nonzeros = np.nonzero(__s_guess)
+            #at_ratio = index_at_ratio(nonzeros[0], len(columns_dropped))
+            print(f"\nrotind={rotind},Iteration #{iteration}: contains correct guess: {__s_guess[nonzeros]}"
+                f" at {nonzeros[0]}", flush=True)
+            if verbose:
+                svp_babai_kwargs['corr_val'] = __s_guess[nonzeros]
+                svp_babai_kwargs['corr_idx'] = nonzeros[0]
+        del __s_guess  # END OF DEBUGGING PART
+
+        # print(f'len={len(b_pri)}\nb_pri={b_pri}\nb_rot={b_rot}')
+        lwe1=(lwe_pri[0],b_rot,s_rot,e_rot) # New Module-LWE instance, corresponding to x^rotind \cdot b =  a (x^rotind \cdot s) + x^rotind \cdot e
+        _, b_vec, __target= bai_galbraith_embedding(
+        N, q, w, lwe1, k, m, s_stddev, e_stddev, columns_to_keep) # Corresponding b_vec and __target for the new Module-LWE instance
+
+        # Collect all b_vec and corresponding targets
+        b_vecs_list.append(b_vec)
+        targets_list.append(__target)
+
+    # Parallel processing of all b_vec
     if eta_svp == 2:
         # Guess where the nonzero entries in s_{guess} are, and
         # check whether the corresponding target b - A_g s_g is a BDD instance using Babai NP.
         if "p" in params:
             e_stddev = error_distribution_rounding_upper_bound(params)
-        target = svp_babai_fp64_nr_projected(
-            reduced_basis, eta_svp, columns_dropped, columns_to_keep, A, b_vec, N,
+        t_gpu_s=time.time()
+
+        # Use new parallel function to process all b_vec
+        result = svp_babai_fp64_nr_projected_multi_target(
+            reduced_basis, eta_svp, columns_dropped, columns_to_keep, A, b_vecs_list, N,
             k, m, q, secret_nonzero_support, w_guess, e_stddev, kannan_coeff,
             verbose=verbose, **svp_babai_kwargs
         )
-    else:
-        # reappend with the tau to call the svp (not for babai)
-        reduced_basis = np.insert(reduced_basis, reduced_basis.shape[1], 0, axis=1)
-        svp_result, _ = svp(
-            reduced_basis, eta_svp, columns_dropped, columns_to_keep, A, b_vec, N,
-            k, m, secret_nonzero_support, w_guess, estimation_vec,
-        )
-        target = svp_result[0]
 
-    if verbose:
-        t3 = time.time()
-        BKZs, NPs, tot = t2 - t1, t3 - t2, t3 - t1
-        print(f'Time spent on BKZ / Babai: {tot:.2f}s ({round(100*BKZs/tot):d}% vs {round(100*NPs/tot):d}%)', flush=True)
+        target, target_idx = result if result[0] is not None else (None, -1)
+        t_gpu_e=time.time()
+        t_gpu+=t_gpu_e-t_gpu_s
+
+        full_norm = sqrt(3 * e_stddev**2 * (m + N - k+1))
+        if target is not None and (np.linalg.norm(target) <= full_norm):
+            # Check if it matches the corresponding target
+            __target = targets_list[target_idx]
+            print(f'target==__target:{np.array_equal(target, __target) or np.array_equal(target, -__target)}')
+            return True
+    else:
+        # For non-Babai algorithms, still use serial processing
+        for i, b_vec in enumerate(b_vecs_list):
+            # reappend with the tau to call the svp (not for babai)
+            reduced_basis = np.insert(reduced_basis, reduced_basis.shape[1], 0, axis=1)
+            svp_result, _ = svp(
+                reduced_basis, eta_svp, columns_dropped, columns_to_keep, A, b_vec, N,
+                k, m, secret_nonzero_support, w_guess, estimation_vec,
+            )
+            target = svp_result[0]
+            full_norm = sqrt(3 * e_stddev**2 * (m + N - k+1))
+            if target is not None and (np.linalg.norm(target) <= full_norm):
+                return True
+
+    #if verbose:
+
+    t3 = time.time()
+    BKZs, NPs, tot = t2 - t1, t3 - t2, t3 - t1
+    print(f'\nBKZ time={BKZs:.2f}s, GPU time={t_gpu:.2f}s,NP time={NPs:.2f}s,tot time={tot:.2f}s \n Time spent on BKZ / Babai: {tot:.2f}s ({round(100*BKZs/tot):d}% vs {round(100*NPs/tot):d}%)',flush=True)
+    #print(f"Time spent on BKZ / Babai: {tot:.2f}s ({round(100*BKZs/tot):d}% vs {round(100*NPs/tot):d}%)")
 
     # here reconstruct the real vector so
     # N = params['k_dim']*n
@@ -632,6 +873,14 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, verbos
     #     s_full[col] = (s2[idx])
 
     # Successful if sv = +/-target
+
+    ###__target = [e || xi s || kannan_coeff]
+    # print(f'__target={__target}')
+    # print(f'target={target}')
+    full_norm = sqrt(3 * e_stddev**2 * (m + N - k+1))
+    if target is not None and (np.linalg.norm(target) <= full_norm):
+        return True
+    return False
     return target is not None and (
         np.array_equal(target, __target) or np.array_equal(target, -__target)
     )
@@ -724,8 +973,10 @@ def parallel_run(iterations, lwe, params, result, num_workers, only_correct_gues
     # num_gpus = min(num_gpus, 2)
 
     # partition CPU cores:
-    num_cores = psutil.cpu_count(logical=False) // num_workers
-    print(f'num_gpus={num_gpus}, num_workers={num_workers}, num_cores={num_cores}')
+    #cpu_count=psutil.cpu_count(logical=False)
+    cpu_count=40
+    num_cores = cpu_count // num_workers
+    print(f'num_gpus={num_gpus},num_workers={num_workers},num_cores={num_cores}\n cpu_count={cpu_count}')
 
     if only_correct_guess:
         _setup_process(lwe, params, num_gpus - 1, num_cores)
@@ -848,7 +1099,7 @@ def run_single_attack(params, run_id, num_workers, only_correct_guess, verbose):
     # Create LWE instance
     lwe = generate_LWE_instance(params, _seed=run_id)
     iterations = int(params['repetitions'])
-
+    # params['repetitions'] denotes the required number of repetitions estimated by lattice-estimator
     # Run attack
     try:
         result = parallel_run(
@@ -862,7 +1113,8 @@ def run_single_attack(params, run_id, num_workers, only_correct_guess, verbose):
 def batch_attack(output_csv, num_workers, runs, only_correct_guess, verbose):
     if runs == 0:
         for params in attack_params.atk_params:
-            params_ = find_attack_parameters(params)
+            params_ = params | {'structure_leverage': True}
+            params_ = find_attack_parameters(params_)
             output_params_info(params_)
         return
 
@@ -876,7 +1128,8 @@ def batch_attack(output_csv, num_workers, runs, only_correct_guess, verbose):
         writer.writeheader()
 
         for params in attack_params.atk_params:
-            params_ = find_attack_parameters(params)
+            params_ = params | {'structure_leverage': True}
+            params_ = find_attack_parameters(params_)
             output_params_info(params_)
 
             for run_id in range(runs):
@@ -903,7 +1156,7 @@ if __name__ == "__main__":
     )
     parser.add_argument('--output', '-o', type=str, default='attack_results.csv', help='Output file')
     parser.add_argument('--workers', '-w', type=int, default=1, help='Number of workers to allocate')
-    parser.add_argument('--runs', '-r', type=int, default=1, help='Number of repetitions (0: only estimate)')
+    parser.add_argument('--runs', '-r', type=int, default=5, help='Number of repetitions (0: only estimate)')
     parser.add_argument('--correct', '-c', action='store_true', help='Only run attack on correct guesses')
     parser.add_argument('--verbose', '-v', action='store_true', help='More verbose output')
 

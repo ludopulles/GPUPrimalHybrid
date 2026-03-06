@@ -34,30 +34,40 @@ atk_params = [
 
     # The following parameter sets are based on the following benchmarks:
     # https://facebookresearch.github.io/LWE-benchmarking/benchmark
+    # [1]: https://eprint.iacr.org/2025/1002.pdf Table 2
+    # [2]: https://eprint.iacr.org/2026/366.pdf  Table 4.4
 
     # Binomial
     # Column 1: binomial, q ~ 2^12
-    type_binomial(2, 2) | {'n': 256, 'q': 3329, 'w': 11},
-    type_binomial(2, 2) | {'n': 256, 'q': 3329, 'w': 12},
+    type_binomial(2, 2) | {'n': 256, 'q': 3329, 'w': 11},  # [1]
+    type_binomial(2, 2) | {'n': 256, 'q': 3329, 'w': 12},  # [1]
+    type_binomial(2, 2) | {'n': 256, 'q': 3329, 'w': 13},  # [2]
+    type_binomial(2, 2) | {'n': 256, 'q': 3329, 'w': 14},  # [2]
 
     # Column 2: binomial, q ~ 2^28
-    type_binomial(2, 2) | {'n': 256, 'q':   179067461, 'w': 20},
-    type_binomial(2, 2) | {'n': 256, 'q':   179067461, 'w': 21},
-    type_binomial(2, 2) | {'n': 256, 'q':   179067461, 'w': 25},
+    type_binomial(2, 2) | {'n': 256, 'q':   179067461, 'w': 20},  # [1]
+    type_binomial(2, 2) | {'n': 256, 'q':   179067461, 'w': 21},  # [1]
+    type_binomial(2, 2) | {'n': 256, 'q':   179067461, 'w': 25},  # [1]
+    type_binomial(2, 2) | {'n': 256, 'q':   179067461, 'w': 26},  # [2]
 
     # Column 3: binomial, q ~ 2^35 (unattempted)
     #type_binomial(2, 3) | {'n': 256, 'q': 34088624597, 'w': 19},
 
     # Ternary
     # Column 4: ternary, q ~ 2^26
-    type_ternary() | {'n': 1024, 'q':        41223389, 'w': 11},
+    type_ternary() | {'n': 1024, 'q':        41223389, 'w': 11},  # [1]
+    type_ternary() | {'n': 1024, 'q':        41223389, 'w': 12},  # [2]
+    type_ternary() | {'n': 1024, 'q':        41223389, 'w': 13},  # [2]
+    type_ternary() | {'n': 1024, 'q':        41223389, 'w': 14},  # [2]
 
     # Column 5: ternary, q ~ 2^29
-    type_ternary() | {'n': 1024, 'q':       274887787, 'w':  9},
+    type_ternary() | {'n': 1024, 'q':       274887787, 'w':  9},  # [1]
     # | {'beta': 50, 'eta_svp': 2, 'm': 241, 'k': 748, 'h_': 3},
-    type_ternary() | {'n': 1024, 'q':       274887787, 'w': 10},
+    type_ternary() | {'n': 1024, 'q':       274887787, 'w': 10},  # [1]
+    type_ternary() | {'n': 1024, 'q':       274887787, 'w': 13},  # [2]
+    type_ternary() | {'n': 1024, 'q':       274887787, 'w': 14},  # [2]
 
-    # Column 5: ternary, q ~ 2^50 (unattempted)
+    # Column 6: ternary, q ~ 2^50 (unattempted)
     #type_ternary() | {'n': 1024, 'q': 607817174438671, 'w': 20},
 ]
 

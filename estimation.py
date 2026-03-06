@@ -1,3 +1,5 @@
+import sys,os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'lattice-estimator'))
 from math import ceil, comb, log, sqrt
 from estimator import LWE, ND  # lattice-estimator
 
@@ -111,10 +113,12 @@ def find_optimal_projection_dimension(diag, G, sigma, p_fp, p_fn):
 
 def find_attack_parameters(params):
     # Find attack parameters:
+    print(f'atk_params={params}')
     params = params.copy()
     N = params["n"] * params.get("k_dim", 1)
     q = params["p"] if "p" in params else params["q"]
-
+    structure_leverage=params.get("structure_leverage",False)
+    ## If 'structure_leverage' exists in the params dictionary, use this parameter; otherwise, set it to False by default
     if params["secret_type"] == "binomial":
         Xs = ND.SparseBinomial(params["w"], eta=params["eta"])
         Xe = ND.CenteredBinomial(params["eta"])
@@ -129,19 +133,21 @@ def find_attack_parameters(params):
 
     if not all(key in params for key in ['beta', 'eta_svp', 'm', 'k', 'h_']):
         print("Computing the best attack parameters...", flush=True)
-        cost = LWE.primal_hybrid(lwe_params, babai=True, mitm=False)
+        cost = LWE.primal_hybrid(lwe_params, babai=True, mitm=False,deg_ring=params['n'],structure_leverage=structure_leverage)
+        #add parameter 'deg_ring',denotes the degree of the polynomial ring
+        #add parameter,denotes whether to use algebraic structures for bit security evaluation of parameters
         cost["m"] = cost["d"] - (N - cost["zeta"]) - 1
         print(cost)
 
         params |= {
             'beta': cost['beta'], 'eta_svp': cost['eta'], 'm': cost['m'], 'k': cost['zeta'],
-            'h_': cost['h_'],
+            'h_': cost['h_'],'repetitions':cost.get("repetitions", 1),'single_prob':cost['single_prob']
         }
     else:
         print("Recomputing cost: ", flush=True)
         cost = LWE.primal_hybrid.cost(
             params['beta'], lwe_params, params['k'], babai=True, mitm=False, m = params['m'] + N,
-            hw=params['h_']
+            hw=params['h_'], deg_ring=params['n'],structure_leverage=structure_leverage
         )
         print(cost)
     return params
@@ -151,8 +157,8 @@ def output_params_info(params):
     aparams = {key: params[key] for key in ['beta', 'eta_svp', 'm', 'k', 'h_']}
     print(f"Attack parameters: {aparams}")
 
-    N = params["n"] * params.get("k_dim", 1)
-    avg_iterations = expected_draws(N, params['k'], params['w'], params['h_'])
+    avg_iterations = 1./params['single_prob']# Calculate the number of iterations based on the estimated probability output by lattice-estimator
+
     print(f"E[ #iterations ] = {avg_iterations:.2f}")
-    print(f"99% success: {required_iterations(params)} iterations.")
+    print(f"99% success: {params['repetitions']} iterations.")
     print()
