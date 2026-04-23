@@ -1,0 +1,34 @@
+# cloning from the cuda docker container
+FROM nvidia/cuda:13.2.1-cudnn-devel-ubuntu24.04
+
+# fetch basic dependencies
+RUN apt-get update
+RUN apt-get install -y --no-install-recommends apt-transport-https ca-certificates
+RUN apt-get install -y --no-install-recommends git wget
+
+# # Making conda available
+# These steps are adapted from https://hub.docker.com/layers/continuumio/miniconda3/26.1.1/images/sha256-d367508574f2215b2bfb467e263bfb203cd74680469201a4ec9790c0da926a53
+# and are meant to prepare an environment that contains conda and autostarts it.
+# Ideally, we would rather create the container starting from miniconda, and then install cuda via conda,
+# however the current miniconda container image fails to install large packages, meaning that we have to do things backwards,
+# starting from the cuda container and installing miniconda.
+ENV PATH=/opt/conda/bin:$PATH
+RUN wget "https://repo.anaconda.com/miniconda/Miniconda3-py313_26.1.1-1-Linux-x86_64.sh" -O miniconda.sh -q
+RUN mkdir -p /opt
+RUN bash miniconda.sh -b -p /opt/conda 
+RUN rm miniconda.sh
+RUN ln -s /opt/conda/etc/profile.d/conda.sh /etc/profile.d/conda.sh
+RUN echo ". /opt/conda/etc/profile.d/conda.sh" >> ~/.bashrc
+RUN echo "conda activate" >> ~/.bashrc 
+RUN /opt/conda/bin/conda tos accept 
+RUN /opt/conda/bin/conda remove --force-remove -y conda-anaconda-tos 
+RUN rm -rf ~/.conda/tos
+RUN find /opt/conda/ -follow -type f -name '*.a' -delete
+RUN find /opt/conda/ -follow -type f -name '*.js.map' -delete 
+RUN /opt/conda/bin/conda clean -afy # buildkit
+
+# copying into root a further install script
+# this can be used by the user on start of the container, by running manually "bash install_deps.sh"
+COPY install_deps.sh /install_deps.sh
+
+CMD ["bash"]
