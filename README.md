@@ -12,6 +12,7 @@ Software:
 
 - CUDA toolkit, recommended: version >=11.0
 - `conda`, `mamba`, or a similar environment manager (recommended is `conda`, see `install.sh`)
+- sagemath
 - (git submodule) `cuBLASter`: BLASter implementation adapted for GPUs
 - (git submodule) `G6K-GPU-Tensor`: GPU-accelerated lattice sieving
 - (git submodule) `lattice-estimator`: used to find good attack parameters based on the estimated cost of the attack
@@ -24,8 +25,9 @@ If you consider installing a CUDA version lower than 12, please edit the `enviro
 
 1. Run `git submodule update --init`
 2. Install `conda` if you haven't already, see [conda docs](https://www.anaconda.com/docs/getting-started/miniconda/install).
-3. Run the installation scripts: `./install.sh`
-4. Install all required Python packages *in the environment*: `pip install -r requirements.txt`
+3. Run the installation script: `./install_conda.sh`, which just installs conda with software dependencies
+4. Activate the environment: `conda activate lwe_attack`
+5. Complete setting up the environment by running `./conda_setup.sh`, which installs all python dependencies.
 
 ## Example
 

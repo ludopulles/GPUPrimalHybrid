@@ -1,7 +1,6 @@
-name: guess-verify
+name: lwe_attack
 channels:
   - conda-forge
-  - main
 dependencies:
   - cupy
   - eigen
@@ -9,4 +8,4 @@ dependencies:
   - gxx_linux-64<=14
   - python=3.12
   - sage
-  - cuda-nvcc
+  - cuda-toolkit
