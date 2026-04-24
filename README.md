@@ -27,6 +27,46 @@ If you consider installing a CUDA version lower than 12, please edit the `enviro
 3. Run the installation scripts: `./install.sh`
 4. Install all required Python packages *in the environment*: `pip install -r requirements.txt`
 
+## Example
+
+1. Make sure you have activated the conda environment (`conda activate lwe_attack`).
+2. Run:
+```bash
+echo "atk_params = [{'n': 256, 'q': 8209, 'w': 8, 'secret_type': 'ternary', 'lwe_sigma': 3.19}]" > attack_params.py
+python attack.py
+```
+
+Expected output:
+```
+Computing the best attack parameters...
+Saved profile to: saved_profiles/prof_b40_n256.npy
+         rop: ≈2^46.5
+         red: ≈2^46.4
+         svp: ≈2^42.5
+           β:       40
+           η:        2
+           ζ:      157
+         |S|: ≈2^22.3
+          h_:        3
+  prob_babai:    0.900
+           d:      268
+        prob:    0.100
+           ↻:       44
+         tag:   hybrid
+          xi:   11.222
+         tau:        3
+           m:      168
+Attack parameters: {'beta': 40, 'eta_svp': 2, 'm': 168, 'k': 157, 'h_': 3}
+E[ #iterations ] = 9.05
+99% success: 40 iterations.
+
+LWE instance is generated using seed 0.
+Iteration #6: contains correct guess: [-1 -1 -1] at [20 30 57] ~ 34%
+Iteration #8: contains correct guess: [-1 -1 -1] at [ 29  54 103] ~ 46%
+[...]
+```
+
+
 ## Main Components
 
 - `attack.py`: Implements multi-GPU parallelization, distributing the workload across available GPUs and managing worker processes.

@@ -1,4 +1,4 @@
-name: lwe_attack
+name: guess-verify
 channels:
   - conda-forge
   - main
