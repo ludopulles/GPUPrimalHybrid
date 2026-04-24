@@ -1,5 +1,11 @@
-# The values here are set for ternary attack on n=1024, q=2^26, w=12, it can be applied to other params by just editing cores, and num_workers
-# for the n=512, q= 3329, w=11, we can set cores=1, num_workers=(number of cores of the machine) (keep in mind that the machine need to have enough GPU also)
+"""
+The values here are set for ternary attack on n=1024, q=2^26, w=12.
+It can be applied to other params by just editing cores, and num_workers.
+For example, for n=512, q=3329, w=11, we can set:
+- cores=1,
+- num_workers=(number of cores of the machine)
+But, keep in mind that the machine needs to have enough GPUs!
+"""
 
 import argparse
 import csv
@@ -7,7 +13,6 @@ import numpy as np
 import os
 import psutil
 import subprocess
-import sys
 import time
 import traceback
 
@@ -27,13 +32,13 @@ from fpylll import IntegerMatrix, CVP
 
 # In this directory
 import attack_params
-from estimation import find_attack_parameters, output_params_info, required_iterations, error_distribution_rounding, error_distribution_rounding_upper_bound
-from instances import BaiGalCenteredScaledTernary, BaiGalModuleLWE, \
-    estimate_target_upper_bound_ternary_vec, estimate_target_upper_bound_binomial_vec
+from estimation import find_attack_parameters, output_params_info, required_iterations, \
+    error_distribution_rounding, error_distribution_rounding_upper_bound
 from lwe import generate_CBD_MLWE, generate_ternary_MLWE, MLWE_to_LWE, bai_galbraith_embedding, \
     select_samples, RoundedDownLWE
 
 import matplotlib.pyplot as plt
+
 
 def BKZ_reduce(basis, beta, verbose=False):
     B, B_red, U = np.ascontiguousarray(np.array(basis, dtype=np.int64).T), None, None
@@ -128,10 +133,10 @@ def svp(
         finish = time.time()
         return B_try.T, finish - timestart
     prof = get_profile(B_try)
-    rr = [(2.0 ** prof[i]) ** 2 for i in range(d)]  # take square norms to match get_r in fpylll
+    rr = [(2.0 ** p) ** 2 for p in prof]  # take square norms to match get_r in fpylll
     for n_expected in range(eta, dim - 2):
-        x = np.linalg.norm(target_estimation[dim - n_expected :]) ** 2
-        if 4.0 / 3.0 * gaussian_heuristic(rr[dim - n_expected :]) > x:
+        x = np.linalg.norm(target_estimation[dim - n_expected:]) ** 2
+        if 4.0 / 3.0 * gaussian_heuristic(rr[dim - n_expected:]) > x:
             break
     print("n_expected", n_expected)
     eta = max(eta, n_expected)
@@ -174,7 +179,7 @@ def svp(
             for value in product(secret_nonzero_support, repeat=d):
                 diff = b.copy()
                 vecs = np.row_stack([row_vecs[j] for j in guess])
-                diff[n - k : -1] -= value.dot(vecs)
+                diff[n - k: -1] -= value.dot(vecs)
                 B_try = np.vstack([basis, diff])
                 _, B_try, _ = reduce(
                     B_try.T,
@@ -284,17 +289,18 @@ def svp_babai_fp64_nr_projected(
             U = cp.empty((babai_dim, batch_size), dtype=cp.float64)
             nearest_plane_gpu(R_np, Y, U, *data_np)
 
-            ## TODO: remove
-            #for bid in range(val_size):
-            #    print('Current guess: idx=', guess_idx[0, :], ' val=', guess_val[:, bid])
-            #    print('target: ', bs_gpu[:, bid].T)
+            # # TODO: remove
+            # for bid in range(val_size):
+            #     print('Current guess: idx=', guess_idx[0, :], ' val=', guess_val[:, bid])
+            #     print('target: ', bs_gpu[:, bid].T)
 
             cp.square(Y, out=Y)  # square inplace
             idx = cp.where(cp.sum(Y, axis=0) <= proj_sqnorm)[0]  # find good candidates
 
             # improvement possible : check if it's well reduce or not by checking if Q.T (t - Bu) <= 1/2 (||b_i*||²)
             # and if not reduce it with nearest plane again
-            if idx.size == 0: continue
+            if idx.size == 0:
+                continue
             for i in range(idx.size):
                 idx_t = int(idx[i].get())
 
@@ -308,7 +314,6 @@ def svp_babai_fp64_nr_projected(
                 # vals_d = guess_val[:, b_idx]
                 # A_rm_sub = cp.asarray(A_guess[:, cp.asnumpy(id_subset)], dtype=cp.float64)
                 # print('Compare: ', A_rm_sub @ vals_d, 'with', guess_batch[:, idx_t])
-                # assert (A_rm_sub @ vals_d) == 
                 # b_try = b_host[:-1].copy()
                 # b_try[-m:] -= cp.asnumpy((A_rm_sub @ vals_d).astype(cp.int64))
                 # print('b: ', bs_gpu[:, idx_t])
@@ -349,7 +354,7 @@ def svp_babai_fp64_nr_projected(
                 # print(f"Discarding guess: full norm is {np.linalg.norm(v):.3f} > {full_norm:.3f}")
     # No solution found.
     if verbose:
-        print(f"\rBabai-NP: unsuccessful                    ", flush=True)
+        print("\rBabai-NP: unsuccessful                    ", flush=True)
     return None
 
 
@@ -363,6 +368,7 @@ def index_at_ratio(indices, max_idx):
             continue
         at_index += comb(max_idx - i - 1, len(indices) - j - 1)
     return at_index / comb(max_idx, len(indices))
+
 
 def generate_LWE_instance(params, _seed=None):
     """
@@ -455,6 +461,7 @@ def drop_and_solve_correct_guess(lwe, params, iteration):
     assert np.count_nonzero(__s_guess) == w_guess
     return solve_guess(lwe, params, iteration, drop, keep, verbose=True)
 
+
 def plot_superposed_from_file_and_basis(
     beta,
     n,
@@ -493,7 +500,7 @@ def plot_superposed_from_file_and_basis(
     fig, ax = plt.subplots(figsize=(7, 4))
     ax.plot(i, r_file_log2[:d], lw=1.8, label=f"saved: prof_{beta}_{n}.npy (log2)")
     ax.plot(i, r_meas_log2[:d], lw=1.6, label="measured reduced_basis (log2)")
-              
+
     ax.set_xlabel("index i")
     ax.set_ylabel("log2")
     ttl = f"Basis profile superposition — β={beta}, n={n}"
@@ -503,11 +510,12 @@ def plot_superposed_from_file_and_basis(
     ax.grid(True, which="both", linestyle=":", alpha=0.6)
     ax.legend()
     plt.tight_layout()
-    #save to file
+    # save to file
     os.makedirs(dirpath, exist_ok=True)
     figpath = os.path.join(dirpath, f"prof_superposed_b{beta}_n{n}.png")
     fig.savefig(figpath)
     plt.close(fig)
+
 
 def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, verbose=False):
     # LWE parameters:
@@ -562,7 +570,7 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, verbos
         # Round instance down
         q = int(params['p'])
         e_stddev = error_distribution_rounding(params)
-    
+
     basis, b_vec, __target = bai_galbraith_embedding(
         N, q, w, lwe, k, m, s_stddev, e_stddev, columns_to_keep
     )
@@ -585,7 +593,7 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, verbos
             N,
             reduced_basis.T,
             prof_from_get_profile=get_profile(reduced_basis.T)
-        ) # appear in dir saved_profiles/
+        )  # appear in dir saved_profiles/
 
     if eta_svp == 2:
         # Guess where the nonzero entries in s_{guess} are, and
@@ -600,6 +608,7 @@ def solve_guess(lwe, params, iteration, columns_dropped, columns_to_keep, verbos
     else:
         # reappend with the tau to call the svp (not for babai)
         reduced_basis = np.insert(reduced_basis, reduced_basis.shape[1], 0, axis=1)
+        estimation_vec = None  # TODO: initialize
         svp_result, _ = svp(
             reduced_basis, eta_svp, columns_dropped, columns_to_keep, A, b_vec, N,
             k, m, secret_nonzero_support, w_guess, estimation_vec,
@@ -713,8 +722,8 @@ def _pool_report(tag=""):
     free, total = cp.cuda.runtime.memGetInfo()
     used = total - free
     mp = cp.get_default_memory_pool()
-    pp = cp.get_default_pinned_memory_pool()
-    print(f"[{tag}] used={used/1e9:.2f}GB | pool_used={mp.used_bytes()/1e9:.2f}GB | pool_held={mp.total_bytes()/1e9:.2f}GB")
+    print(f"[{tag}] used={used/1e9:.2f}GB | pool_used={mp.used_bytes()/1e9:.2f}GB |"
+          f"pool_held={mp.total_bytes()/1e9:.2f}GB")
 
 
 # --- orchestration -----------------------------------------------------------
@@ -748,15 +757,15 @@ def parallel_run(iterations, lwe, params, result, num_workers, only_correct_gues
     # stop_event = Manager().Event()
     ctx = get_context("spawn")
 
-    # Create a pool of executors, one for each GPU
-    #executors = []
-    #for g in range(num_gpus):
-    #    ex = ProcessPoolExecutor(
-    #        max_workers=num_workers // num_gpus, mp_context=ctx,
-    #        initializer=_init_worker, initargs=(g, cpu_sets[g]),
-    #        # initializer=_init_worker, initargs=(str(PROJECT_ROOT), g, cpu_sets[g]),
-    #    )
-    #    executors.append(ex)
+    #  Create a pool of executors, one for each GPU
+    # executors = []
+    # for g in range(num_gpus):
+    #     ex = ProcessPoolExecutor(
+    #         max_workers=num_workers // num_gpus, mp_context=ctx,
+    #         initializer=_init_worker, initargs=(g, cpu_sets[g]),
+    #         # initializer=_init_worker, initargs=(str(PROJECT_ROOT), g, cpu_sets[g]),
+    #     )
+    #     executors.append(ex)
 
     num_workers_per_gpu = [b - a for a, b in divide_range(num_workers, num_gpus)]
 
@@ -853,7 +862,7 @@ def run_single_attack(params, run_id, num_workers, only_correct_guess, verbose):
         result = parallel_run(
             iterations, lwe, params, result, num_workers, only_correct_guess, verbose
         )
-    except:
+    except Exception:
         result["error"] = traceback.format_exc()
     return result
 
@@ -901,7 +910,7 @@ if __name__ == "__main__":
         description='Attack LWE with sparse secrets'
     )
     parser.add_argument('--output', '-o', type=str, default='attack_results.csv', help='Output file')
-    parser.add_argument('--workers', '-w', type=int, default=4, help='Number of workers to allocate')
+    parser.add_argument('--workers', '-w', type=int, default=1, help='Number of workers to allocate')
     parser.add_argument('--runs', '-r', type=int, default=1, help='Number of repetitions (0: only estimate)')
     parser.add_argument('--correct', '-c', action='store_true', help='Only run attack on correct guesses')
     parser.add_argument('--verbose', '-v', action='store_true', help='More verbose output')
