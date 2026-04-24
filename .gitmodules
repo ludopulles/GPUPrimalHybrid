@@ -1,0 +1,10 @@
+[submodule "G6K-GPU-Tensor"]
+	path = G6K-GPU-Tensor
+	url = git@github.com:plvie/G6K-GPU-Tensor.git
+[submodule "lattice-estimator"]
+	path = lattice-estimator
+	url = git@github.com:ludopulles/lattice-estimator.git
+	branch = gpu-primal-hybrid
+[submodule "cuBLASter"]
+	path = cuBLASter
+	url = git@github.com:ludopulles/cuBLASter.git

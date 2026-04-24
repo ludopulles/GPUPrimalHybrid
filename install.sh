@@ -33,24 +33,9 @@ if ! command -v nvcc &> /dev/null; then
     exit 1
 fi
 
-clone_repo() {
-    local url=$1
-    local dir=$2
-    if [ -d "$dir" ]; then
-        echo "Directory '$dir' already exists. Skipping clone."
-    else
-        git clone "$url" "$dir"
-    fi
-}
-
-clone_repo "https://github.com/plvie/G6K-GPU-Tensor.git" "G6K-GPU-Tensor"
-clone_repo "https://github.com/ludopulles/lattice-estimator.git" "lattice-estimator"
-clone_repo "https://github.com/ludopulles/cuBLASter.git" "cuBLASter"
-
 # Install lattice-estimator
 echo "Installing lattice-estimator in editable mode..."
 pushd lattice-estimator >/dev/null
-git checkout gpu-primal-hybrid  # Switch to this branch.
 pip install -e .
 popd >/dev/null
 
