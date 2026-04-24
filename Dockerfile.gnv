@@ -1,10 +1,17 @@
 # cloning from the cuda docker container
-FROM nvidia/cuda:13.2.1-cudnn-devel-ubuntu24.04
+FROM nvidia/cuda:13.2.1-cudnn-devel-ubuntu22.04
 
 # fetch basic dependencies
 RUN apt-get update
+
+# https://dev.to/grigorkh/fix-tzdata-hangs-during-docker-image-build-4o9m
+ENV TZ=Europe/Amsterdam
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+RUN apt-get install -y --no-install-recommends tzdata
+
 RUN apt-get install -y --no-install-recommends apt-transport-https ca-certificates
-RUN apt-get install -y --no-install-recommends git wget
+RUN apt-get install -y --no-install-recommends git libeigen3-dev sagemath wget
+# Note: if Eigen version 5.0 is released, update the package name
 
 # # Making conda available
 # These steps are adapted from https://hub.docker.com/layers/continuumio/miniconda3/26.1.1/images/sha256-d367508574f2215b2bfb467e263bfb203cd74680469201a4ec9790c0da926a53

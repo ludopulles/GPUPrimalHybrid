@@ -33,16 +33,14 @@ if ! command -v nvcc &> /dev/null; then
     exit 1
 fi
 
-# Install lattice-estimator
-echo "Installing lattice-estimator in editable mode..."
-pushd lattice-estimator >/dev/null
-pip install -e .
-popd >/dev/null
+# Install python package dependencies:
+pip install -r requirements.txt -r G6K-GPU-Tensor/requirements.txt
+
+pip install -e lattice-estimator
 
 # Build G6K-GPU-Tensor
 echo "Building G6K-GPU-Tensor..."
 pushd G6K-GPU-Tensor >/dev/null
-pip install Cython
 REAL_NVCC=$(readlink -f $(which nvcc))
 REAL_CUDA_DIR=$(dirname $(dirname "$REAL_NVCC"))
 REAL_CXX=$(which g++)
@@ -65,7 +63,6 @@ export CC="$REAL_CC"
 export CXX="$REAL_CXX"
 
 chmod +x rebuild.sh
-pip install -r requirements.txt
 ./rebuild.sh -f -y
 python setup.py install
 popd >/dev/null
@@ -77,7 +74,6 @@ make eigen3
 pip install --no-build-isolation -e .
 popd >/dev/null
 
-pip install -r requirements.txt
 
 echo "All done! Your environment is ready and repositories are cloned and installed."
 echo "Don't forget to activate the '${ENV_NAME}' environment before running any code: conda activate ${ENV_NAME}"

@@ -1,5 +1,7 @@
 #!/bin/bash
 
+git submodule update --init
+
 DOCKERCMD=${DOCKER:-docker}
 BASENAME=guess-verify
 

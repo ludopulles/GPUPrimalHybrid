@@ -12,9 +12,9 @@ Software:
 
 - CUDA toolkit, recommended: version >=11.0
 - `conda`, `mamba`, or a similar environment manager (recommended is `conda`, see `install.sh`)
-- `cuBLASter`: BLASter implementation adapted for GPUs
-- `G6K-GPU-Tensor`: GPU-accelerated lattice sieving
-- `lattice-estimator`: used to find good attack parameters based on the estimated cost of the attack
+- (git submodule) `cuBLASter`: BLASter implementation adapted for GPUs
+- (git submodule) `G6K-GPU-Tensor`: GPU-accelerated lattice sieving
+- (git submodule) `lattice-estimator`: used to find good attack parameters based on the estimated cost of the attack
 
 ## Installation
 
@@ -22,15 +22,16 @@ You will need the CUDA toolkit installed and properly configured on your system 
 You can install it via the [official NVIDIA website](https://developer.nvidia.com/cuda-downloads).
 If you consider installing a CUDA version lower than 12, please edit the `environment.yml` file to specify the compatible versions of `gcc` and `g++` (e.g., `gcc_linux-64<=11` and `gxx_linux-64<=11` for CUDA 11.x).
 
-1. Install `conda` if you haven't already, see [conda docs](https://www.anaconda.com/docs/getting-started/miniconda/install).
-2. Run the installation scripts: `./install.sh`
-3. Install all required Python packages *in the environment*: `pip install -r requirements.txt`
+1. Run `git submodule update --init`
+2. Install `conda` if you haven't already, see [conda docs](https://www.anaconda.com/docs/getting-started/miniconda/install).
+3. Run the installation scripts: `./install.sh`
+4. Install all required Python packages *in the environment*: `pip install -r requirements.txt`
 
 ## Main Components
 
 - `attack.py`: Implements multi-GPU parallelization, distributing the workload across available GPUs and managing worker processes.
 	Use this for actual attacks.
-	See [Usage section](#Usage) below for details.
+	See [Usage section](#usage) below for details.
 - `attack_params.py`: Contains a list of parameter sets for different LWE instances to be attacked.
 	We advise you to **uncomment just one** parameter set, when using the `attack.py` script (or its variant).
 	One may optionally specify the attack parameters, see the commented lines for examples.

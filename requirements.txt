@@ -1,8 +1,8 @@
-mpmath<1.4.0
-pyparsing<3.2
-fpylll==0.6.4
-matplotlib==3.10.5
-numpy==2.3.2
-pandas==2.3.2
-psutil==7.0.0
-tqdm==4.67.1
+Cython
+cysignals
+fpylll
+matplotlib
+numpy
+psutil
+setuptools
+tqdm

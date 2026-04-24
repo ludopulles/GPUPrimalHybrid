@@ -1,9 +1,12 @@
 name: lwe_attack
 channels:
   - conda-forge
+  - main
 dependencies:
-  - sage
-  - python=3.12
   - cupy
+  - eigen
   - gcc_linux-64<=14
   - gxx_linux-64<=14
+  - python=3.12
+  - sage
+  - cuda-nvcc
