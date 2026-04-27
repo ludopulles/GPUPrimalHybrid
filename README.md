@@ -2,7 +2,9 @@
 
 This repository contains an implementation of the Guess + Verify attack against the Learning with Errors (LWE) with sparse secrets (binomial or ternary), using GPUs.
 
-## Requirements and dependencies
+## Experiment preparation
+
+### Requirements and dependencies
 
 Hardware:
 
@@ -11,13 +13,13 @@ Hardware:
 Software:
 
 - CUDA toolkit, recommended: version >=11.0
-- `conda`, `mamba`, or a similar environment manager (recommended is `conda`, see `install.sh`)
+- `conda`, `mamba`, or a similar environment manager (recommended is `conda`)
 - sagemath
 - (git submodule) `cuBLASter`: BLASter implementation adapted for GPUs
 - (git submodule) `G6K-GPU-Tensor`: GPU-accelerated lattice sieving
 - (git submodule) `lattice-estimator`: used to find good attack parameters based on the estimated cost of the attack
 
-## Installation
+### Installation
 
 You will need the CUDA toolkit installed and properly configured on your system to run this code. Make sure to have the appropriate drivers and CUDA version compatible with your GPU.
 You can install it via the [official NVIDIA website](https://developer.nvidia.com/cuda-downloads).
@@ -25,11 +27,11 @@ If you consider installing a CUDA version lower than 12, please edit the `enviro
 
 1. Run `git submodule update --init`
 2. Install `conda` if you haven't already, see [conda docs](https://www.anaconda.com/docs/getting-started/miniconda/install).
-3. Run the installation script: `./install_conda.sh`, which just installs conda with software dependencies
+3. Run the installation script: `bash install_conda.sh`, which creates a Conda environment called `lwe_attack` and installs some software dependencies.
 4. Activate the environment: `conda activate lwe_attack`
-5. Complete setting up the environment by running `./conda_setup.sh`, which installs all python dependencies.
+5. Complete setting up the environment by running `bash conda_setup.sh`, which completes installing dependences dependencies.
 
-## Example
+### Testing the environment setup
 
 1. Make sure you have activated the conda environment (`conda activate lwe_attack`).
 2. Run:
@@ -38,7 +40,7 @@ echo "atk_params = [{'n': 256, 'q': 8209, 'w': 8, 'secret_type': 'ternary', 'lwe
 python attack.py
 ```
 
-Expected output:
+This should result in a very quick attack. Expected output:
 ```
 Computing the best attack parameters...
 Saved profile to: saved_profiles/prof_b40_n256.npy
@@ -68,8 +70,11 @@ Iteration #8: contains correct guess: [-1 -1 -1] at [ 29  54 103] ~ 46%
 [...]
 ```
 
+Note, this over-writes the `attack_params.py` file. You can recover it via `git reset` or by making a copy.
 
-## Main Components
+## Reproducing our results
+
+### Artifact main components
 
 - `attack.py`: Implements multi-GPU parallelization, distributing the workload across available GPUs and managing worker processes.
 	Use this for actual attacks.
@@ -85,14 +90,16 @@ There are some variants/dialects of `attack.py` for testing purposes:
 	This code is more detailed than `attack.py` because of all the testing code.
 - `attack_reduce_vram.py`: Attempts at reducing the VRAM usage on the GPU, by repeatedly recreating the `cupy` context. This may slightly slow down execution.
 
-## Parameters
+### Attack parameters
 
 Set the numbers of workers and chunk size in `attack.py` according to your hardware capabilities.
 
 - `num_workers`: Number of parallel workers (ideally a multiple of the number of GPUs and CPU cores, but may be limited by GPUs VRAM)
 - `GUESS_BATCH`: Number of batches to process in each guess (affects GPUs memory usage and performance)
 
-### Lattice Embedding
+The parameters for the LWE instances being attacked can be found in `attack_params.py`.
+
+### Lattice embedding
 
 The system creates LWE instances in the file `lwe.py`.
 
@@ -103,7 +110,7 @@ The embedding and ternary LWE instance creation are taken from the [Cool+Cruel=D
     https://gitlab.com/fvirdia/cool-plus-cruel-equals-dual
 ) repository. We also more generally adopted their file naming conventions, as this code is based on theirs. Many thanks to the authors.
 
-### Result Handling
+### Result collection
 
 The results of the attack are collected and saved in a CSV file, including:
 
@@ -119,7 +126,7 @@ The results of the attack are collected and saved in a CSV file, including:
 - `time_elapsed`: Wall time taken for the attack
 - `error`: Any error encountered during the attack (if applicable)
 
-## Usage
+### Usage
 
 To run the attack, execute the following command in your environment:
 
@@ -127,7 +134,7 @@ To run the attack, execute the following command in your environment:
 python attack.py
 ```
 
-### Example usage
+#### Example usage
 
 For example, to repeat the first "MLWE parameters" row of Table 2, perform these two steps:
 
