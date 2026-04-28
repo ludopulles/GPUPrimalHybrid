@@ -29,7 +29,7 @@ If you consider installing a CUDA version lower than 12, please edit the `enviro
 2. Install `conda` if you haven't already, see [conda docs](https://www.anaconda.com/docs/getting-started/miniconda/install).
 3. Run the installation script: `bash install_conda.sh`, which creates a Conda environment called `lwe_attack` and installs some software dependencies.
 4. Activate the environment: `conda activate lwe_attack`
-5. Complete setting up the environment by running `bash conda_setup.sh`, which completes installing dependences dependencies.
+5. Run `bash conda_setup.sh`, which completes the installation of dependencies in the Conda environment.
 
 ### Testing the environment setup
 
