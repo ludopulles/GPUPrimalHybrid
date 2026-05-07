@@ -11,7 +11,7 @@ else
 fi
 
 if [ "$CONDA_DEFAULT_ENV" != "$ENV_NAME" ]; then
-	echo "Run 'conda activate $ENV_NAME', and execute 'bash conda-setup.sh' to finish installation."
+	echo "Run 'conda activate $ENV_NAME', and execute 'bash conda_setup.sh' to finish installation."
 else
-	source conda-setup.sh
+	source conda_setup.sh
 fi
